@@ -1,0 +1,20 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 실행 중 생성되는 로컬 상태
+signal_history.json
+
+# 대용량 캐시 데이터 (스크립트가 자동 재다운로드함)
+sp500_historical_components.csv
+
+# 백업
+*.bak
+
+# OS / 에디터
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
