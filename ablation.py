@@ -1,4 +1,4 @@
-"""논문 1부: 방법론 결함별 기여도 분해(ablation).
+"""논문 1부: 방법론 결함별 기여도 분해(ablation) — 스윙(가격 기반) 버전.
 
 [무엇을 보이려는 연구인가]
 "무료 공개 데이터로 만든 개인 투자자용 퀀트 파이프라인"에서, 흔히 저지르는
@@ -6,22 +6,28 @@
 결함을 하나씩만 켜고 나머지는 올바른 설정으로 고정해(one-at-a-time ablation),
 그 결함 단독의 기여도를 측정합니다.
 
+[재무제표를 뺀 이유]
+초기 실험에서 유의성이 재무 지표가 아니라 가격 변동성(1개월 구간)에서
+나온다는 사실이 드러났습니다(4.4절 다중검정 실험). yfinance 무료
+재무제표는 ~4년치밖에 없어 기간을 늘려 검정력을 보완할 수도 없었습니다.
+그래서 재무제표를 아예 빼고, 가격만으로 계산되는 지표(모멘텀·변동성·
+시장 대비 상대강도)와 더 짧은 예측 기간(1개월)으로 전환했습니다. 이제
+기간 제약이 없어(SWING_YEARS) 검정력을 실질적으로 늘릴 수 있습니다.
+
 [측정하는 결함]
-  ① p값 계산      : 행(종목×날짜)을 독립 표본으로 셈 (iid 가정)
+  ① p값 계산       : 행(종목×날짜)을 독립 표본으로 셈 (iid 가정)
   ② 소표본 유니버스 : 종목 41개 (vs S&P500 확장)
-  ③ 연간 룩어헤드   : 10-K에도 분기 기한(45일)을 적용 (실제 기한 60~90일)
-  ④ 성장률 부호     : pct_change가 적자 기준에서 부호를 뒤집음
+  ⑤ 평가일 솎아내기 : 라벨이 겹치지 않도록 evaluation date를 horizon 간격으로 솎음
 
 [측정하지 못하는 결함 - 논문에 명시할 것]
-  ⑤ 생존 편향 : 현재 시점 S&P500 구성종목으로 과거를 학습. 상장폐지·지수
-     제외 종목이 빠져 있습니다. 시점별 구성종목 데이터가 무료로는 사실상
-     구할 수 없어 이 스크립트로는 켜고 끌 수 없고, 한계로 기술합니다.
+  ⑧ 생존 편향·지수 편입일 룩어헤드 : experiment_survivorship.py에서 별도 측정.
 
 실행: py ablation.py            (전체 유니버스, 오래 걸림)
       py ablation.py --quick    (종목 60개로 축소, 빠른 점검용)
 """
 import argparse
 import sys
+sys.stdout.reconfigure(encoding="utf-8")
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -30,22 +36,19 @@ import pandas as pd
 
 import core
 
-
 # 결함을 하나씩만 켜는 설정들. 첫 줄이 '전부 올바른' 기준선입니다.
 CONFIGS = [
-    # (이름, universe, lag_quarterly, lag_annual, growth_formula, pvalue_method, eval_mode)
-    ("기준선 (전부 수정됨)",       "large", 45, 90, "abs_base", "fama_macbeth", "overlap_nw"),
-    ("① p값만 iid 가정",           "large", 45, 90, "abs_base", "iid",          "overlap_nw"),
-    ("② 소표본 유니버스(41종목)",   "small", 45, 90, "abs_base", "fama_macbeth", "overlap_nw"),
-    ("③ 연간 룩어헤드(연간도 45일)", "large", 45, 45, "abs_base", "fama_macbeth", "overlap_nw"),
-    ("④ 성장률 부호 오류",         "large", 45, 90, "naive",    "fama_macbeth", "overlap_nw"),
-    ("⑤ 평가일 솎아내기(구 방식)",   "large", 45, 90, "abs_base", "fama_macbeth", "nonoverlap_iid"),
-    ("전부 순진하게 (원래 상태)",    "small", 45, 45, "naive",    "iid",          "nonoverlap_iid"),
+    # (이름, universe, pvalue_method, eval_mode)
+    ("기준선 (전부 수정됨)",       "large", "fama_macbeth", "overlap_nw"),
+    ("① p값만 iid 가정",           "large", "iid",          "overlap_nw"),
+    ("② 소표본 유니버스(41종목)",   "small", "fama_macbeth", "overlap_nw"),
+    ("⑤ 평가일 솎아내기(구 방식)",   "large", "fama_macbeth", "nonoverlap_iid"),
+    ("전부 순진하게 (원래 상태)",    "small", "iid",          "nonoverlap_iid"),
 ]
 
 
-def build_panel(tickers, df_all, macro_prepared, lag_q, lag_a, growth, workers=20):
-    """주어진 설정으로 전 종목 패널을 만듭니다(원본 재무는 캐시 재사용).
+def build_panel(tickers, df_all, macro_prepared, workers=20):
+    """주어진 유니버스로 가격 기반 패널을 만듭니다(재무제표 조회 없음).
 
     ⭐ [재현성] 결과를 종목별 dict에 담았다가 '정렬된 티커 순서'로 이어붙입니다.
     as_completed 순서(= 네트워크 응답 도착 순서)대로 붙이면 실행할 때마다 행
@@ -56,11 +59,8 @@ def build_panel(tickers, df_all, macro_prepared, lag_q, lag_a, growth, workers=2
     results = {}
     def one(tk):
         try:
-            fh = core.get_fundamental_history(tk, lag_quarterly=lag_q,
-                                              lag_annual=lag_a, growth_formula=growth)
-            if fh.empty:
-                return tk, None
-            return tk, core.build_value_panel(df_all, fh, macro_prepared, tk)
+            p = core.build_value_panel(df_all, None, macro_prepared, tk, include_fundamentals=False)
+            return tk, p
         except Exception:
             return tk, None
 
@@ -90,9 +90,9 @@ def main():
         large = large[:60]
         print(f"[quick] 소표본 {len(small)}종목 / 확장 {len(large)}종목으로 축소 실행\n")
 
-    start_date = (pd.Timestamp.today() - pd.DateOffset(years=core.AUTO_YEARS)).strftime("%Y-%m-%d")
+    start_date = (pd.Timestamp.today() - pd.DateOffset(years=core.SWING_YEARS)).strftime("%Y-%m-%d")
 
-    print("가격·매크로 데이터 수집 중...")
+    print(f"가격·매크로 데이터 수집 중 ({core.SWING_YEARS}년)...")
     t0 = time.time()
     df_all = core.download_all_data(tuple(large), start_date)
     macro_prepared = core.prepare_macro(core.download_macro_data(start_date))
@@ -102,17 +102,19 @@ def main():
     print(f"  완료 ({time.time() - t0:.0f}초)\n")
 
     rows = []
-    for name, uni, lag_q, lag_a, growth, pmethod, emode in CONFIGS:
+    for name, uni, pmethod, emode in CONFIGS:
         tickers = small if uni == "small" else large
         t0 = time.time()
         print(f"[{name}] 종목 {len(tickers)}개 · 패널 생성 중...", flush=True)
-        panel = build_panel(tickers, df_all, macro_prepared, lag_q, lag_a, growth)
+        panel = build_panel(tickers, df_all, macro_prepared)
         if panel.empty:
             rows.append((name, len(tickers), None, None, None, None, "패널 생성 실패"))
             print("   -> 패널 비어있음\n")
             continue
 
-        res = core.run_value_model(panel, pvalue_method=pmethod, eval_mode=emode)
+        res = core.run_value_model(panel, horizon_override=core.SWING_HORIZON,
+                                   pvalue_method=pmethod, eval_mode=emode,
+                                   require_fundamentals=False)
         if res is None or "error" in res:
             rows.append((name, len(tickers), None, None, None, None,
                          f"모델 실패: {res.get('error', '?') if res else '?'}"))
@@ -129,7 +131,7 @@ def main():
               f"· p {pval:.4f} · 독립날짜 {fm_T}개 · {verdict}  ({time.time() - t0:.0f}초)\n")
 
     print("\n" + "=" * 92)
-    print("결함별 기여도 (one-at-a-time ablation)")
+    print("결함별 기여도 (one-at-a-time ablation, 스윙/가격 기반)")
     print("=" * 92)
     hdr = f"{'설정':<28}{'종목':>6}{'AUC':>8}{'t값':>9}{'p값':>10}{'독립날짜':>9}  판정"
     print(hdr)
@@ -144,7 +146,7 @@ def main():
     print("-" * 92)
     print("해석: 기준선 대비 특정 행에서 AUC가 높아지거나 p값이 작아졌다면,")
     print("      그 차이는 시장의 신호가 아니라 '그 결함이 만들어낸 착시'입니다.")
-    print("주의: 생존 편향(현재 지수 구성종목으로 과거 학습)은 이 표로 측정 불가 — 한계로 기술.")
+    print("주의: 생존 편향(현재 지수 구성종목으로 과거 학습)은 이 표로 측정 불가 — experiment_survivorship.py 참조.")
 
     out = pd.DataFrame(rows, columns=["설정", "종목수", "AUC", "t값", "p값", "독립날짜", "판정"])
     out.to_csv("ablation_results.csv", index=False, encoding="utf-8-sig")

@@ -10,6 +10,8 @@ stats_utils.py의 자체 점검은 개발용이라 반복이 40회로 적습니�
       py simulate_falsepositive.py --n 200
 """
 import argparse
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
 
 import numpy as np
 import pandas as pd

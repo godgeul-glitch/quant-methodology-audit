@@ -20,6 +20,8 @@
 실행: py experiment_multipletesting.py
 """
 import itertools
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -34,10 +36,7 @@ def build_panel(tickers, df_all, macro_prepared, workers=20):
 
     def one(tk):
         try:
-            fh = core.get_fundamental_history(tk)
-            if fh.empty:
-                return tk, None
-            return tk, core.build_value_panel(df_all, fh, macro_prepared, tk)
+            return tk, core.build_value_panel(df_all, None, macro_prepared, tk, include_fundamentals=False)
         except Exception:
             return tk, None
 
@@ -53,18 +52,15 @@ def build_panel(tickers, df_all, macro_prepared, workers=20):
 
 def make_variants():
     """연구자가 실제로 시도해볼 법한 설정들 (researcher degrees of freedom)."""
-    all_feats = list(core.VALUE_FEATURES)
-    price_feats = ["Momentum_126", "Volatility_60", "Market_Relative"]
-    fund_feats = [f for f in all_feats if f not in price_feats]
+    all_feats = list(core.SWING_FEATURES)  # [Momentum_126, Volatility_60, Market_Relative]
 
     feature_choices = [
         ("전체 지표", None),
-        ("재무 지표만", fund_feats),
-        ("PEG 제외", [f for f in all_feats if f != "PEG_Inv"]),
+        ("모멘텀 제외", [f for f in all_feats if f != "Momentum_126"]),
         ("변동성 제외", [f for f in all_feats if f != "Volatility_60"]),
-        ("성장률 제외", [f for f in all_feats if f != "Earnings_Growth"]),
+        ("상대강도 제외", [f for f in all_feats if f != "Market_Relative"]),
     ]
-    horizon_choices = [("6개월", None), ("3개월", 63), ("1개월", 21)]
+    horizon_choices = [("1개월", 21), ("2개월", 42), ("3개월", 63)]
     rf_choices = [
         ("깊이3", None),
         ("깊이2", {"max_depth": 2}),
@@ -86,7 +82,7 @@ def make_variants():
 
 def main():
     pool = sorted(set(core.VALUE_UNIVERSE_TICKERS) | set(core.ALL_TICKERS))
-    start_date = (pd.Timestamp.today() - pd.DateOffset(years=core.AUTO_YEARS)).strftime("%Y-%m-%d")
+    start_date = (pd.Timestamp.today() - pd.DateOffset(years=core.SWING_YEARS)).strftime("%Y-%m-%d")
 
     print("가격·매크로 수집 중...")
     t0 = time.time()
@@ -112,6 +108,7 @@ def main():
             horizon_override=v["horizon_override"],
             feature_subset=v["feature_subset"],
             rf_params=v["rf_params"],
+            require_fundamentals=False,
         )
         if not res or "error" in res:
             print(f"  [{i:2d}/{len(variants)}] {v['label']:<34} 실패")
@@ -133,7 +130,7 @@ def main():
     p = df["p"]
     n_sig = int((p <= 0.05).sum())
     best = df.iloc[0]
-    honest = df[df["label"].str.startswith("전체 지표 · 6개월 · 깊이3")]
+    honest = df[df["label"].str.startswith("전체 지표 · 1개월 · 깊이3")]
 
     print()
     print("=" * 80)

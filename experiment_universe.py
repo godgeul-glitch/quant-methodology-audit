@@ -23,6 +23,8 @@ S&P500에서 무작위로 42종목을 N번 뽑아 매번 같은 파이프라인(
       py experiment_universe.py --n 30    (횟수 지정)
 """
 import argparse
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -35,15 +37,12 @@ UNIVERSE_SIZE = 42   # 손으로 고른 명단과 같은 크기로 맞춤
 
 
 def build_panel(tickers, df_all, macro_prepared, workers=20):
-    """전부 올바른 설정으로 패널 생성 (원본 재무는 캐시 재사용)."""
+    """가격 기반(재무제표 없음) 패널 생성."""
     results = {}
 
     def one(tk):
         try:
-            fh = core.get_fundamental_history(tk)
-            if fh.empty:
-                return tk, None
-            return tk, core.build_value_panel(df_all, fh, macro_prepared, tk)
+            return tk, core.build_value_panel(df_all, None, macro_prepared, tk, include_fundamentals=False)
         except Exception:
             return tk, None
 
@@ -62,7 +61,7 @@ def evaluate(tickers, df_all, macro_prepared):
     panel = build_panel(tickers, df_all, macro_prepared)
     if panel.empty:
         return None
-    res = core.run_value_model(panel)
+    res = core.run_value_model(panel, horizon_override=core.SWING_HORIZON, require_fundamentals=False)
     if res is None or "error" in res:
         return None
     return {
@@ -80,21 +79,14 @@ def main():
 
     pool = sorted(set(core.VALUE_UNIVERSE_TICKERS) | set(core.ALL_TICKERS))
     handpicked = sorted(set(core.ALL_TICKERS))
-    start_date = (pd.Timestamp.today() - pd.DateOffset(years=core.AUTO_YEARS)).strftime("%Y-%m-%d")
+    start_date = (pd.Timestamp.today() - pd.DateOffset(years=core.SWING_YEARS)).strftime("%Y-%m-%d")
 
     print(f"전체 풀 {len(pool)}종목에서 {UNIVERSE_SIZE}종목씩 {args.n}회 무작위 추출\n")
 
-    print("가격·매크로 수집 중...")
+    print(f"가격·매크로 수집 중 ({core.SWING_YEARS}년)...")
     t0 = time.time()
     df_all = core.download_all_data(tuple(pool), start_date)
     macro_prepared = core.prepare_macro(core.download_macro_data(start_date))
-    print(f"  완료 ({time.time() - t0:.0f}초)")
-
-    # 무작위 draw가 어떤 종목을 뽑든 즉시 쓰이도록 원본 재무를 미리 데워둔다
-    print("재무 원본 캐시 예열 중 (이후 draw는 네트워크 호출 없음)...")
-    t0 = time.time()
-    with ThreadPoolExecutor(max_workers=20) as ex:
-        list(ex.map(lambda t: core.get_fundamental_history(t), pool))
     print(f"  완료 ({time.time() - t0:.0f}초)\n")
 
     # 기준: 손으로 고른 명단

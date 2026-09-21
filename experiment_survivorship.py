@@ -25,6 +25,8 @@
 """
 import io
 import os
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -67,10 +69,7 @@ def build_panel(tickers, df_all, macro_prepared, workers=20):
 
     def one(tk):
         try:
-            fh = core.get_fundamental_history(tk)
-            if fh.empty:
-                return tk, None
-            return tk, core.build_value_panel(df_all, fh, macro_prepared, tk)
+            return tk, core.build_value_panel(df_all, None, macro_prepared, tk, include_fundamentals=False)
         except Exception:
             return tk, None
 
@@ -106,7 +105,7 @@ def report(name, res):
 
 
 def main():
-    start_ts = pd.Timestamp.today() - pd.DateOffset(years=core.AUTO_YEARS)
+    start_ts = pd.Timestamp.today() - pd.DateOffset(years=core.SWING_YEARS)
     start_date = start_ts.strftime("%Y-%m-%d")
 
     print("시점별 구성종목 데이터 로드...")
@@ -149,21 +148,24 @@ def main():
     # A. 현재 방식 - 현재 구성종목을 전 기간에 사용
     pa = panel_all[panel_all["Ticker"].isin(current)]
     results["A"] = report("A. 현재 방식 (편입일 무시·탈락종목 없음)",
-                          core.run_value_model(pa))
+                          core.run_value_model(pa, horizon_override=core.SWING_HORIZON,
+                                              require_fundamentals=False))
 
     # B. 편입일 반영 - 현재 구성종목만 쓰되 실제 편입 이후만
     pb = apply_membership(pa, hist)
     print(f"     (편입일 적용으로 {len(pa):,} -> {len(pb):,}행, "
           f"{(1 - len(pb)/len(pa))*100:.1f}% 제거)")
     results["B"] = report("B. 편입일 반영 (룩어헤드 제거)",
-                          core.run_value_model(pb))
+                          core.run_value_model(pb, horizon_override=core.SWING_HORIZON,
+                                              require_fundamentals=False))
 
     # C. 시점별 구성종목 - 탈락 종목까지 복원
     pc = apply_membership(panel_all, hist)
     n_rm_rows = (pc["Ticker"].isin(got_removed)).sum()
     print(f"     (탈락 종목 복원으로 {n_rm_rows:,}행 추가, 총 {len(pc):,}행)")
     results["C"] = report("C. 시점별 구성종목 (생존편향 부분 교정)",
-                          core.run_value_model(pc))
+                          core.run_value_model(pc, horizon_override=core.SWING_HORIZON,
+                                              require_fundamentals=False))
 
     print("-" * 84)
     a, b, c = results.get("A"), results.get("B"), results.get("C")

@@ -109,6 +109,11 @@ FEATURE_EASY_NAMES = {
 # ⭐ 알고리즘 자동 최적 설정 (사용자가 만질 필요 없도록 내부 고정)
 # 초보자가 잘못 조정해 모델을 망가뜨리는 것을 막기 위해 검증된 기본값을 사용합니다.
 AUTO_YEARS = 5           # 표본 수와 최신 시장 반영의 균형점
+# ⭐ 논문용 스윙(가격 기반) 연구 전용. 재무제표를 쓰지 않으므로 yfinance의
+# ~4년 재무 이력 제약이 없어 가격 데이터가 허용하는 만큼 기간을 늘릴 수 있다.
+# 라이브 앱(AUTO_YEARS)과는 별개 상수로, 앱의 기존 동작에는 영향을 주지 않는다.
+SWING_YEARS = 15
+SWING_HORIZON = 21  # ~1개월. 4.4절에서 유의성이 몰려 있던 구간.
 AUTO_PROB_THRESHOLD = 0.38   # 상승 신호로 인정하는 최소 확률
 AUTO_HALF_KELLY = 0.5        # 하프 켈리(권장 안전 배수)
 AUTO_KELLY_CAP = 25.0        # 한 종목 최대 투자 비중 상한(%)
@@ -150,6 +155,10 @@ VALUE_FEATURES = [
 # 이들이 빠지면 '가치투자'가 아니라 사실상 주가 모멘텀 모델이 되므로,
 # 최소 2개는 반드시 확보되어야 분석을 진행합니다.
 FUNDAMENTAL_FEATURES = ["Earnings_Yield", "Book_to_Price", "ROE", "Profit_Margin", "Earnings_Growth", "PEG_Inv"]
+# ⭐ 논문용 스윙 연구 전용: 가격만으로 계산되는 지표만 남긴 부분집합.
+# run_value_model(..., require_fundamentals=False)와 함께 쓰면 재무제표
+# 없이(=4년 이력 제약 없이) 순수 가격 기반 횡단면 모델을 돌릴 수 있다.
+SWING_FEATURES = ["Momentum_126", "Volatility_60", "Market_Relative"]
 
 VALUE_FEATURE_EASY = {
     "Earnings_Yield": "이익 대비 주가 매력도",
@@ -855,20 +864,48 @@ def get_fundamental_history(ticker: str,
         return pd.DataFrame()
 
 def build_value_panel(price_df: pd.DataFrame, fund_df: pd.DataFrame,
-                      macro_prepared: pd.DataFrame, ticker: str) -> pd.DataFrame:
-    """일별 주가 + 재무 시계열을 결합해 가치 지표 패널을 만듭니다.
+                      macro_prepared: pd.DataFrame, ticker: str,
+                      include_fundamentals: bool = True) -> pd.DataFrame:
+    """일별 주가(+ 재무 시계열)를 결합해 지표 패널을 만듭니다.
 
     ⭐ PER/PBR 대신 그 역수인 이익수익률(E/P)·순자산비율(B/P)을 씁니다.
     PER은 적자일 때 음수가 되면서 '아주 저평가'처럼 보이는 역전이 생기고,
     이익이 0에 가까우면 무한대로 발산합니다. 역수를 쓰면 적자는 자연스럽게
     음수(=나쁨), 고평가는 0에 가까운 값(=나쁨)으로 단조롭게 정렬됩니다.
+
+    include_fundamentals=False (논문용 스윙 연구 전용): 재무제표를 아예
+    조회·결합하지 않고 가격만으로 계산되는 지표(SWING_FEATURES)만 만든다.
+    yfinance 무료 재무제표의 ~4년 이력 제약에서 벗어나 가격 데이터가
+    허용하는 만큼(SWING_YEARS) 기간을 늘릴 수 있다. 기본값(True)은 기존
+    동작 그대로라 app.py의 가치투자 랭킹 탭에는 영향이 없다.
     """
     try:
         px = standardize_ohlcv(price_df, ticker)
-        if px.empty or fund_df is None or fund_df.empty:
+        if px.empty:
             return pd.DataFrame()
         px.index = pd.to_datetime(px.index).tz_localize(None).normalize()
         px = px.ffill()
+
+        if not include_fundamentals:
+            d = px.copy()
+            d["Momentum_126"] = d["Close"].pct_change(126) * 100
+            d["Volatility_60"] = d["Close"].pct_change().rolling(60).std() * 100
+            if macro_prepared is not None and not macro_prepared.empty:
+                shift = 1 if str(ticker).endswith(".KS") else 0
+                m = macro_prepared.shift(shift)
+                d = d.join(m[["SP500_Close"]])
+                d["Market_Relative"] = (d["Close"].pct_change(126) - d["SP500_Close"].pct_change(126)) * 100
+            else:
+                d["Market_Relative"] = 0.0
+            d = d.replace([np.inf, -np.inf], np.nan)
+            d["Fwd_Return"] = (d["Close"].shift(-VALUE_HORIZON) / d["Close"] - 1.0) * 100
+            d["Ticker"] = ticker
+            keep = SWING_FEATURES + ["Close", "Fwd_Return", "Ticker"]
+            keep = [c for c in dict.fromkeys(keep) if c in d.columns]
+            return d[keep]
+
+        if fund_df is None or fund_df.empty:
+            return pd.DataFrame()
 
         f = fund_df.copy()
         f.index = pd.to_datetime(f.index).tz_localize(None).normalize()
@@ -916,7 +953,8 @@ def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
                     pvalue_method: str = "fama_macbeth",
                     eval_mode: str = "overlap_nw",
                     train_tickers=None, eval_tickers=None,
-                    feature_subset=None, rf_params=None):
+                    feature_subset=None, rf_params=None,
+                    require_fundamentals: bool = True):
     """⭐ 횡단면(cross-sectional) 가치투자 모델.
 
     단기 모델과 결정적으로 다른 점:
@@ -941,34 +979,37 @@ def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
             _rf_kwargs.update(rf_params)
 
         avail = [c for c in VALUE_FEATURES if c in panel.columns]
-        fund_avail = [c for c in FUNDAMENTAL_FEATURES if c in panel.columns]
-        if not fund_avail:
-            return {"error": "재무 지표를 전혀 가져오지 못했습니다"}
 
-        # ⭐ [중요] 확보율은 '재무 데이터가 존재하는 구간' 기준으로 계산합니다.
-        # 전체 기간 기준으로 계산하면, 재무 이력이 최근 일부에만 있을 때
-        # 모든 재무 지표가 확보율 미달로 탈락하고 주가 지표만 남아
-        # '가치투자'라는 이름으로 사실상 모멘텀 모델이 학습되는 문제가 있었습니다.
-        _has_fund = panel[fund_avail].notna().any(axis=1)
-        _base = panel[_has_fund]
-        if _base.empty:
-            return {"error": "재무 지표가 있는 구간이 없습니다"}
+        if require_fundamentals:
+            fund_avail = [c for c in FUNDAMENTAL_FEATURES if c in panel.columns]
+            if not fund_avail:
+                return {"error": "재무 지표를 전혀 가져오지 못했습니다"}
 
-        coverage = {c: float(_base[c].notna().mean()) for c in avail}
+            # ⭐ [중요] 확보율은 '재무 데이터가 존재하는 구간' 기준으로 계산합니다.
+            # 전체 기간 기준으로 계산하면, 재무 이력이 최근 일부에만 있을 때
+            # 모든 재무 지표가 확보율 미달로 탈락하고 주가 지표만 남아
+            # '가치투자'라는 이름으로 사실상 모멘텀 모델이 학습되는 문제가 있었습니다.
+            _has_fund = panel[fund_avail].notna().any(axis=1)
+            _base = panel[_has_fund]
+            if _base.empty:
+                return {"error": "재무 지표가 있는 구간이 없습니다"}
+            # 재무 데이터가 있는 구간만 분석 대상으로 삼습니다.
+            panel = _base
+
+        coverage = {c: float(panel[c].notna().mean()) for c in avail}
         used_feats = [c for c in avail if coverage[c] >= 0.30]
         # ⭐ [실험용] 다중검정 연구에서 '연구자가 피처 조합을 바꿔보는' 행위를
         # 재현하기 위한 손잡이. 기본값(None)이면 기존 동작 그대로입니다.
         if feature_subset is not None:
             used_feats = [c for c in used_feats if c in set(feature_subset)]
-        used_fund = [c for c in used_feats if c in FUNDAMENTAL_FEATURES]
-        if len(used_fund) < 2:
-            return {"error": f"쓸 수 있는 재무 지표가 {len(used_fund)}개뿐입니다 (최소 2개 필요). "
-                             f"주가 지표만으로는 가치투자 분석이라 할 수 없어 중단했습니다."}
-        if len(used_feats) < 3:
-            return {"error": f"쓸 수 있는 지표가 {len(used_feats)}개뿐입니다 (최소 3개 필요)"}
-
-        # 재무 데이터가 있는 구간만 분석 대상으로 삼습니다.
-        panel = _base
+        if require_fundamentals:
+            used_fund = [c for c in used_feats if c in FUNDAMENTAL_FEATURES]
+            if len(used_fund) < 2:
+                return {"error": f"쓸 수 있는 재무 지표가 {len(used_fund)}개뿐입니다 (최소 2개 필요). "
+                                 f"주가 지표만으로는 가치투자 분석이라 할 수 없어 중단했습니다."}
+        _min_used = 3 if require_fundamentals else 2
+        if len(used_feats) < _min_used:
+            return {"error": f"쓸 수 있는 지표가 {len(used_feats)}개뿐입니다 (최소 {_min_used}개 필요)"}
 
         # ⭐ 결측 처리 전략 [중요]:
         # 지표별 확보율이 각각 48~94%여도, 8개를 '동시에' 갖춘 행만 남기면
@@ -1026,8 +1067,11 @@ def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
         #   - 린치 PEG: PER을 성장률로 나눈 값이 낮을수록 좋음. 적자거나
         #     성장이 없으면(PEG 정의 불가) 린치라면 사지 않을 종목이므로
         #     최하 점수로 처리합니다(중립이 아니라 "나쁨"으로 취급).
-        df["_bench_simple_per"] = df["Earnings_Yield"]
-        if "Earnings_Growth" in df.columns:
+        if "Earnings_Yield" in df.columns:
+            df["_bench_simple_per"] = df["Earnings_Yield"]
+        else:
+            df["_bench_simple_per"] = np.nan
+        if "Earnings_Yield" in df.columns and "Earnings_Growth" in df.columns:
             with np.errstate(divide="ignore", invalid="ignore"):
                 _peg = (100.0 / df["Earnings_Yield"]) / df["Earnings_Growth"]
             _peg_valid = (df["Earnings_Yield"] > 0) & (df["Earnings_Growth"] > 0)

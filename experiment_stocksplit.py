@@ -24,6 +24,8 @@
       py experiment_stocksplit.py --n 5
 """
 import argparse
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -38,10 +40,7 @@ def build_panel(tickers, df_all, macro_prepared, workers=20):
 
     def one(tk):
         try:
-            fh = core.get_fundamental_history(tk)
-            if fh.empty:
-                return tk, None
-            return tk, core.build_value_panel(df_all, fh, macro_prepared, tk)
+            return tk, core.build_value_panel(df_all, None, macro_prepared, tk, include_fundamentals=False)
         except Exception:
             return tk, None
 
@@ -61,7 +60,7 @@ def main():
     args = ap.parse_args()
 
     pool = sorted(set(core.VALUE_UNIVERSE_TICKERS) | set(core.ALL_TICKERS))
-    start_date = (pd.Timestamp.today() - pd.DateOffset(years=core.AUTO_YEARS)).strftime("%Y-%m-%d")
+    start_date = (pd.Timestamp.today() - pd.DateOffset(years=core.SWING_YEARS)).strftime("%Y-%m-%d")
 
     print("가격·매크로 수집 중...")
     t0 = time.time()
@@ -85,8 +84,10 @@ def main():
         s1 = set(perm[:half])     # 학습 종목
         s2 = set(perm[half:])     # 한 번도 학습에 안 쓰인 종목
 
-        seen = core.run_value_model(panel, train_tickers=s1, eval_tickers=s1)
-        unseen = core.run_value_model(panel, train_tickers=s1, eval_tickers=s2)
+        seen = core.run_value_model(panel, horizon_override=core.SWING_HORIZON,
+                                    require_fundamentals=False, train_tickers=s1, eval_tickers=s1)
+        unseen = core.run_value_model(panel, horizon_override=core.SWING_HORIZON,
+                                      require_fundamentals=False, train_tickers=s1, eval_tickers=s2)
         if (not seen or "error" in seen) or (not unseen or "error" in unseen):
             continue
 
