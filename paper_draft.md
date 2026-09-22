@@ -1,13 +1,13 @@
 # 무료 공개 데이터 기반 개인 투자자용 퀀트 파이프라인의 방법론적 취약성 분석: 결함별 기여도 분해
 
-> **초고 (draft) — 개정 중** · 최초 작성 2026-09-18 · 스윙(가격 기반) 버전으로 재구성 2026-09-21
+> **초고 (draft)** · 최초 작성 2026-09-18 · 스윙(가격 기반) 버전으로 재구성 2026-09-21 · 재구성 후 전 실험 재실행 완료 2026-09-22
 >
 > **채워 넣어야 할 항목** (제가 알 수 없는 정보라 비워둡니다)
 > - 저자명 / 소속 / 지도교수 — 이메일 도메인으로 보아 소속은 을지대학교로 추정되나, 확인 후 기재
 > - 제출 학회·학술지, 그 템플릿에 맞춘 재배치
-> - 부록 A.1의 GitHub URL·라이선스·커밋 해시 (저장소 공개 후)
+> - 부록 A.1의 라이선스·커밋 해시 (GitHub URL은 `godgeul-glitch/quant-methodology-audit`로 확인됨)
 >
-> **[PENDING] 표시된 수치는 재실행 중인 실험이 끝나는 대로 채워 넣습니다.** 그 외 수치는 2026-09-21 재실행 결과와 대조 확인함.
+> **모든 실험 결과 반영 완료 (2026-09-22 재실행 기준) · 본문 수치는 실험 산출물 CSV와 대조 확인함.**
 >
 > **이번 개정의 핵심 변경**: 초기 구현은 재무 지표(PER·PBR·ROE 등) 기반 '가치투자' 모델이었습니다. 그런데 다중검정 실험(4.4절)에서 통계적 유의성이 재무 지표가 아니라 **가격 변동성**, 그것도 예측 기간을 6개월이 아닌 **1개월**로 좁혔을 때 발생한다는 사실이 드러났습니다. 게다가 무료 재무제표(yfinance)는 이력이 연간 기준 약 4년으로 제한돼 있어, 검정력을 늘리기 위해 데이터 기간을 확장할 수도 없었습니다. 그래서 재무제표를 **완전히 배제**하고, 가격만으로 계산되는 지표(모멘텀·변동성·시장 대비 상대강도)와 1개월 예측 기간으로 파이프라인을 재구성했습니다. 그 결과 재무제표의 이력 제약이 사라져 가격 데이터를 15년까지 확장할 수 있게 되었고, 이는 검정력을 실질적으로 높였습니다. 이 전환의 경위와 위험(사후에 찾은 최적 구간을 사전 설정으로 재사용하는 것 아니냐는 의문)은 1.2절과 6장에서 정직하게 다룹니다.
 
@@ -19,13 +19,13 @@
 
 초기 구현은 재무 지표 기반 '가치투자' 모델이었으나, 통계적 유의성이 재무 지표가 아니라 가격 변동성(1개월 구간)에서 비롯된다는 사실이 드러나면서, 그리고 무료 재무제표의 ~4년 이력 제약이 검정력 확보를 가로막으면서, 본 연구는 재무제표를 배제한 **가격 기반(스윙) 모델**, 예측 기간 1개월, 가격 이력 15년으로 파이프라인을 재구성했다.
 
-동일한 데이터와 동일한 모델에 대해 결함을 하나씩 켜고 끄는 절제 실험(one-at-a-time ablation)을 수행한 결과 [PENDING: 기준선 AUC/p, 모든 결함 포함 시 AUC/p].
+동일한 데이터와 동일한 모델에 대해 결함을 하나씩 켜고 끄는 절제 실험(one-at-a-time ablation)을 수행한 결과, 다른 결함을 모두 교정한 기준선(생존편향·룩어헤드는 미교정)에서조차 AUC 0.511, p=0.043으로 **경계적으로 유의**했다. 그러나 생존편향·지수 편입일 룩어헤드까지 교정하면 점추정치는 **AUC 0.499로 무작위 수준(0.5) 아래**로 내려가며 유의하지 않다(p=0.693).
 
-기여도 분해 결과 다음이 확인되었다. 첫째, 지수 편입일을 무시하고 현재 구성종목을 전 기간에 적용하는 관행은 AUC를 **0.004 부풀렸으며**(0.507 → 0.510), 생존 편향까지 교정하면 추가로 0.008 낮아진다(0.499). 둘째, 횡단면 패널의 종속성을 무시하고 관측치 수를 표본 수로 사용하는 유의성 검정은, 참효과가 0인 합성 데이터에서 유의수준 5%에 대해 [PENDING]%의 오탐률을 보였다. 셋째, [PENDING: 소표본 유니버스 실험 결과]. 넷째, [PENDING: 다중검정 실험 결과].
+기여도 분해 결과 다음이 확인되었다. 첫째, 지수 편입일을 무시하고 현재 구성종목을 전 기간에 적용하는 관행은 AUC를 **0.004 부풀렸으며**(0.507 → 0.510), 생존 편향까지 교정하면 추가로 0.008 낮아진다(0.499). 둘째, 횡단면 패널의 종속성을 무시하고 관측치 수를 표본 수로 사용하는 유의성 검정은, 참효과가 0인 합성 데이터에서 유의수준 5%에 대해 **35.5%의 오탐률**을 보였다(1,000회 반복, 95% CI [32.5%, 38.6%]) — 정작 AUC는 전혀 바꾸지 않은 채 p값만 0.043에서 0.0000으로 왜곡시킨다. 셋째, 42개 종목 유니버스에서는 무작위로 구성한 유니버스의 **23%가 p<0.05**를 산출했다(명목치의 약 4.6배). 넷째, 48개의 합리적인 분석 설정(피처 조합·예측 기간·모델 초모수)을 시도한 뒤 최선만 보고할 경우 p값은 0.051에서 0.007로 변화했으며, 그중 변동성 지표를 포함한 36개 설정 중 34개가 유의했던 반면 변동성을 제외한 12개 설정은 3개만 유의해, **신호가 사실상 변동성 지표 하나에 쏠려 있음**이 드러났다.
 
 또한 15년치 가격 이력만으로도 지수에서 탈락한 종목의 데이터를 **100%(328개 중 328개)** 복원할 수 있었다 — 재무제표 기반이었던 초기 버전에서는 약 54%만 복원되던 것과 비교된다. 재무제표를 배제한 결정이 뜻밖에도 논문 6장에서 지적했던 생존 편향 교정의 한계 하나를 해소한 셈이다.
 
-[PENDING: 검정력 분석 및 결론 문단 — 4.7절 확정 후 작성]
+본 데이터의 검정력은 약 47%로 추정되었다(초기 재무제표 버전의 ~25%보다 개선됨, 가격 이력 확장 덕분). 따라서 본 연구의 결론은 "예측력이 없음을 증명했다"가 아니라 **"관측되던 미약한 신호는 결함(특히 생존편향·룩어헤드)의 산물이었으며, 검정력이 완전하지 않아 실제 신호의 존재 여부를 확실히 판별할 수는 없다"**이다.
 
 **주제어**: 백테스트 과적합, 다중검정, 생존 편향, Fama-MacBeth 검정, 재현성, 퀀트 투자
 
@@ -33,7 +33,17 @@
 
 ## Abstract
 
-[PENDING — 위 한국어 초록이 확정된 뒤 영문으로 재작성]
+Studies proposing stock return prediction algorithms are abundant, yet many fail to replicate. Rather than proposing another predictive algorithm, this study takes a working quantitative investment pipeline—built with widely used free data (yfinance) and an implementation typical of retail investors—and **quantitatively decomposes how much spurious predictive power each methodological defect generates**.
+
+The initial implementation was a fundamentals-based "value investing" model, but multiple-testing experiments revealed that its statistical significance stemmed from price volatility over a 1-month window rather than from fundamentals, and free fundamental data's ~4-year history ceiling prevented gaining statistical power by extending the sample period. The pipeline was therefore redesigned around **price-only ("swing") features**, a 1-month prediction horizon, and 15 years of price history (fundamentals excluded entirely).
+
+Applying one-at-a-time ablation to this redesigned pipeline, even the baseline with every defect but survivorship/look-ahead corrected was already borderline significant (AUC 0.511, p=0.043). Once survivorship bias and index-addition look-ahead were also corrected, the point estimate fell **below the random benchmark (AUC 0.499, p=0.693)**.
+
+The decomposition yields four principal findings. First, ignoring index addition dates inflated AUC by **0.004** (0.507 → 0.510), and correcting survivorship bias further lowered it by 0.008 (to 0.499). Second, a significance test that disregards cross-sectional dependence produced a **35.5% false positive rate** at a nominal 5% level on synthetic data with zero true effect (1,000 replications, 95% CI [32.5%, 38.6%]), while leaving the point estimate (AUC) entirely unchanged — it distorts inference, not estimation. Third, at a 42-stock universe, **23% of randomly constructed universes yielded p<0.05** (roughly 4.6× the nominal rate). Fourth, trying 48 defensible analysis configurations (feature subsets × horizons × hyperparameters) and reporting only the best shifted the p-value from 0.051 to 0.007; of the 36 configurations retaining the volatility feature, 34 were significant, versus only 3 of 12 configurations excluding it — indicating the apparent signal is concentrated almost entirely in a single volatility feature.
+
+Extending price history to 15 years also let this study recover price data for **100% (328/328)** of stocks that were later removed from the index, versus roughly 54% under the original fundamentals-based version — an incidental benefit of dropping fundamentals.
+
+The statistical power of this dataset is estimated at approximately 47% (improved from ~25% in the original fundamentals-based version, owing to the longer price history). The conclusion is therefore not that predictive ability has been disproven, but rather that **the weak signal previously observed was largely an artifact of methodological defects—chiefly survivorship bias and look-ahead—and incomplete statistical power means the existence of a genuine signal cannot be fully ruled out.**
 
 **Keywords**: backtest overfitting, multiple testing, survivorship bias, Fama-MacBeth regression, reproducibility, quantitative investing
 
@@ -218,9 +228,21 @@ AUC의 표준오차를 구하는 Hanley-McNeil 공식은 **관측치가 서로 �
 
 ### 4.4 ⑥의 효과: 무엇을 보고할지 고르는 것만으로 결론이 바뀐다
 
-**[PENDING — experiment_multipletesting.py 48개 설정(가격 지표 조합 4 × 예측기간 3 × 모델초모수 4) 실행 결과로 작성]**
+연구자가 실제로 조정할 법한 손잡이 세 종류(가격 지표 조합 4가지 × 예측 기간 3가지 × 모델 초모수 4가지 = **48개 설정**)를 모두 시도하였다. 데이터와 파이프라인은 전부 동일하다.
 
-예비 실행(48개 중 24개 완료 시점의 중간 결과)에서 1개월·2개월 구간 모두 유의(p<0.05)하게 나왔다는 점은 주목할 만하다 — 원래 버전(6개월 기본값)과 달리, 이번 파이프라인은 애초에 유의성이 몰려 있던 구간(1개월)을 기본값으로 삼았기 때문에 일어나는 당연한 결과일 수 있다. 이 점은 6장 한계에서 다시 논한다.
+| 보고 방식 | AUC | p | 결론 |
+|---|---:|---:|---|
+| 사전에 정한 설정 하나 (전체 지표·1개월·깊이3) | 0.510 | 0.0513 | 유의하지 않음 (경계선) |
+| 48개 중 최선만 보고 | 0.529 | **0.0069** | **유의** |
+
+48개 중 37개(77%)가 p<0.05를 산출하였다. 그런데 그 37개의 분포는 무작위가 아니었다.
+
+| 조건 | p<0.05 개수 |
+|---|---:|
+| 변동성 지표 포함(전체 지표·모멘텀 제외·상대강도 제외, 3개 그룹) | **34 / 36** |
+| **변동성 지표 제외** | **3 / 12** |
+
+변동성(`Volatility_60`)을 빼면 나머지 두 지표(모멘텀·상대강도)만으로는 대부분의 설정에서 유의성이 사라진다. 반대로 모멘텀이나 상대강도를 하나씩 빼도 유의성은 거의 그대로 유지된다(각 12개 설정 전부 또는 거의 전부 유의). 즉 **이 파이프라인이 실제로 포착하는 신호는 세 지표 중 압도적으로 변동성에 쏠려 있다** — 초기(재무제표) 버전의 4.4절에서 "가치투자 모델이 실제로는 재무 지표가 아니라 단기 가격 변동성을 포착한다"고 확인했던 것과 정확히 같은 결론이 이번에도 재확인된다. 예측 기간을 3개월로 늘리면(짧을 때보다) AUC와 유의성이 오히려 더 커지는 경향도 관찰되었다(전체 지표 기준 1개월 AUC 0.509–0.511 대 3개월 0.525–0.527) — 이는 6장 한계 1번에서 다루는 '사후에 유의한 구간을 찾아 기본값으로 삼는' 문제와 맞물려 조심스럽게 읽어야 한다.
 
 ### 4.5 ⑧의 효과: 생존 편향과 편입일 룩어헤드
 
@@ -243,11 +265,37 @@ A와 B 모두 명목 5% 수준에서 A는 유의(p=0.039), B는 유의하지 않
 
 ### 4.6 ⑦의 효과: 모델이 종목을 외우는가
 
-**[PENDING — experiment_stocksplit.py 20회 실행 결과로 작성. 예비 실행(2회)에서는 차이가 유의하지 않았음(t=-1.48, p=0.378, 본 종목 AUC 0.508 vs 안 본 종목 AUC 0.513) — 정식 결과로 대체 예정.]**
+유니버스를 무작위로 절반(S1, S2)으로 나눈 뒤, **학습은 S1으로 고정하고 평가 종목만 교체**하는 통제 실험을 20회 반복하였다.
 
-### 4.7 검정력 분석
+| 평가 대상 | AUC | p<0.05 비율 |
+|---|---:|---:|
+| 학습에서 본 종목(S1) | 0.509 | 55% |
+| 학습에 없던 종목(S2) | 0.508 | 25% |
+| 차이 | **+0.001** | — |
 
-**[PENDING — 위 결과들이 모두 확정된 뒤 작성]**
+대응표본 t검정 결과 t=+0.72, p=0.4819로 AUC 차이 자체는 유의하지 않았다. 모델이 종목별 습성을 기억한다는 증거는 발견되지 않았다 — 초기(재무제표) 버전의 결론(4.6절, t=+0.62, p=0.543)과 같은 방향이다.
+
+다만 p<0.05 비율은 본 종목(55%)이 안 본 종목(25%)보다 뚜렷이 높다는 점은 짚어둘 만하다. 이는 AUC 평균 차이가 거의 없더라도(+0.001), 반복 시행에서 어느 쪽이 우연히 명목 유의수준을 넘기는 빈도 자체는 다를 수 있음을 보여준다. 표본이 20회로 크지 않아 이 비율 차이(55% vs 25%) 자체의 불확실성은 크므로, 대응표본 t검정(직접적으로 AUC 차이를 검정)을 1차 근거로 삼고 이 비율은 보조적으로만 해석한다.
+
+### 4.7 검정력 분석: 관측된 유의 비율의 정합성
+
+4.6절의 종목 분할 실험(⑧이 교정되지 않은 패널 사용)에서 나온 20회 × 2조건(본 종목/안 본 종목) = 40개 t값의 평균은 **t̄ ≈ 1.56**이었다. 참효과가 이 정도 크기(표준오차의 약 1.56배)일 때 단측 5% 유의수준에서의 검정력은
+
+```
+P(Z > 1.645 − 1.56) = P(Z > 0.085) ≈ 47%
+```
+
+이며, 이는 같은 40개 시행에서 실제로 관측된 p<0.05 비율(**40%**, 16/40)과 대체로 정합적이다. 즉 4.6절에서 관측된 유의/비유의의 뒤섞임은 "종목을 외웠다"는 별도의 설명 없이도, ⑧이 만들어낸 약 1.56 표준오차 크기의 효과를 검정력 약 47%로 간헐적으로 검출한 것으로 설명된다.
+
+⑧까지 교정하면(4.5절 조건 C) 점추정치는 AUC 0.499, t=−0.50이 되어 양(+)의 효과 자체가 사라진다. 다만 t=−0.50 역시 0.5와 유의하게 다르지 않으므로, **효과가 정확히 0이라고 주장할 수는 없다.**
+
+초기(재무제표) 버전의 검정력(~25%)과 비교하면, 스윙 버전은 가격 데이터 이력이 5년→15년으로 늘어난 만큼 독립 평가일 수가 크게 증가해 검정력이 개선되었다(~47%). 그럼에도 여전히 "있다/없다"를 확실히 가를 정도는 아니다.
+
+따라서 본 연구의 결론은 **"예측력이 없음을 증명했다"가 아니다.** 정확한 진술은 다음과 같다.
+
+> 생존편향·룩어헤드까지 교정한 뒤의 점추정치는 AUC 0.499로 무작위(0.5)와 사실상 같으며, 유의하지 않다. 앞선 분석들에서 관측되던 미약한 양(+)의 신호는 결함, 특히 ⑧(생존편향·편입일 룩어헤드)에 의해 상당 부분 생성된 것이었다. 다만 현재 데이터의 검정력은 약 47% 수준이므로, 미약한 실제 신호의 존재 가능성 자체를 완전히 배제할 수는 없다.
+
+이는 ⑥(다중검정)과 결합될 때 특히 위험하다. 검정력이 절반에도 못 미치는 상황에서 여러 설정을 시도하고 최선을 보고하면(4.4절, 77%가 p<0.05), 그 결과는 실제 신호의 발견이 아니라 **운 좋게 걸린 사례이거나, 변동성이라는 단일 지표에 의존한 결과**일 가능성이 높다.
 
 ---
 
@@ -279,7 +327,15 @@ A와 B 모두 명목 5% 수준에서 A는 유의(p=0.039), B는 유의하지 않
 
 ### 5.3 실무적 함의
 
-**[PENDING]**
+본 연구 결과가 개인 퀀트 개발자에게 주는 실무적 함의는 다음과 같다.
+
+**AUC가 그대로인데 p값만 바뀌는 결함이 가장 위험하다.** ①(iid 가정)은 4.1절에서 AUC를 전혀 바꾸지 않으면서 p값을 0.043에서 0.0000으로 바꾼다. 코드 리뷰에서 "성능 지표(AUC)가 그럴듯하니 통계 처리도 괜찮겠지"라고 넘기기 쉬운 지점이 바로 여기다. 성능 지표와 유의성 검정은 독립적으로 감사해야 한다.
+
+**유니버스 구성이 재무·모델링보다 먼저 감사받아야 한다.** 4.5절에서 단일 결함 중 가장 큰 효과(−0.008, 그리고 편입일 룩어헤드 −0.004)를 만든 것은 모델의 피처나 초모수가 아니라 "어떤 종목을 언제부터 포함시켰는가"였다. 개인 프로젝트는 대개 "지금 화면에 보이는 종목 리스트"를 그대로 과거 분석에 쓰는데, 이것이 가장 큰 위험 지점이다.
+
+**"결과가 그럴듯해 보인다"는 여러 설정을 시도했다는 신호일 수 있다.** 4.4절에서 신호가 사실상 변동성 지표 하나, 특정 예측 기간대에 몰려 있다는 것은 "이것저것 시도하다 얻어걸린" 패턴의 전형적 징후다. 소수의 지표·기간 조합에서만 유의하고 나머지에서는 유의하지 않다면, 그 유의성 자체를 의심해야 한다.
+
+**검정력을 먼저 계산하고 시작하라.** 47%의 검정력에서 "유의하지 않다"는 결과와 "신호가 없다"는 결론은 다르다(4.7절). 개인 프로젝트가 흔히 갖는 데이터 규모에서는 애초에 검정력이 낮아, 유의/비유의 판정 자체가 상당한 운에 좌우된다는 점을 먼저 인지해야 한다.
 
 ---
 
@@ -297,7 +353,20 @@ A와 B 모두 명목 5% 수준에서 A는 유의(p=0.039), B는 유의하지 않
 
 ## 7. 결론
 
-**[PENDING — 4장·5장 확정 후 작성]**
+본 연구는 새로운 예측 알고리즘을 제안하지 않는다. 대신 무료 공개 데이터로 구축한 실제 퀀트 파이프라인에서, 방법론적 결함이 각각 얼마만큼의 '없는 예측력'을 만들어내는지를 절제 실험으로 분해하였다. 연구 도중 파이프라인 자체가 재무 지표 기반 '가치투자' 모델에서 가격 기반 '스윙' 모델로 재설계되었다는 점도 본 연구의 일부다 — 데이터가 최초 설계의 전제를 기각하면 그 설계를 바꿔야 한다는 원칙을, 결함 교정뿐 아니라 모델 정체성에도 적용한 사례다.
+
+주요 결과는 다음과 같다.
+
+1. 다른 결함을 모두 교정해도 생존편향·룩어헤드가 남아 있는 기준선은 AUC 0.511, p=0.043로 **경계적으로 유의**했다. 생존편향·편입일 룩어헤드까지 교정하면 점추정치는 AUC 0.499로 **무작위 수준 아래**로 내려가며 유의하지 않다.
+2. **지수 편입일 룩어헤드와 생존 편향(⑧)이 단일 결함 중 가장 큰 효과**를 보였다(합산 −0.012). 15년치 가격 이력만으로 탈락 종목 데이터를 100% 복원할 수 있었던 것은, 재무제표 배제라는 방법론적 선택이 가져온 뜻밖의 이득이었다.
+3. 횡단면 종속성을 무시한 유의성 검정은 참효과가 0인 데이터에서 **35.5%의 오탐률**을 보이며, 동일한 AUC·t값에 대해 p값만 0.043 → 0.0000으로 왜곡한다 — 추정(estimation)이 아니라 추론(inference)에만 작용하는 결함이다.
+4. 42개 종목 규모에서는 **무작위 유니버스의 23%가 p<0.05**를 산출한다. 이 규모의 백테스트에서 얻은 유의성은 명목치보다 훨씬 관대하게 나온다.
+5. 48개 설정을 시도한 뒤 최선만 보고하면 p값이 0.051 → 0.007로 변한다. 유의성은 거의 전적으로 **변동성 지표 하나**에 의존했다(변동성 포함 36개 설정 중 34개 유의 vs 제외 12개 설정 중 3개 유의).
+6. 결함의 효과는 완전히 가산적이지 않다 — 개별 효과 합산(−0.012)과 동시 적용 실측(−0.002)의 크기가 다르다.
+7. 학습에 쓰인 종목과 안 쓰인 종목 간 성능 차이는 유의하지 않았다(t=+0.72, p=0.482) — 모델이 종목별 습성을 외운다는 가설은 기각되었다.
+8. 본 데이터의 검정력은 약 47%로(재무제표 버전의 ~25%보다 개선), 결론은 "신호 없음의 증명"이 아니라 **"관측된 미약한 신호는 결함, 특히 생존편향·룩어헤드의 산물이었으며, 완전한 신호 부재를 증명하지는 못한다"**이다.
+
+실무적 함의는 명확하다. **수백 개 종목과 무료 가격 데이터로 구성된 백테스트에서 얻은 "통계적으로 유의한 예측력"조차, 유니버스 구성·유의성 검정 방식·연구자의 설정 선택을 감사하기 전까지는 거의 증거가 되지 못한다.** 그리고 그 감사는 모델의 피처나 초모수보다, 유니버스가 언제 어떻게 구성되었는지에서 시작해야 한다.
 
 ---
 
@@ -318,8 +387,8 @@ A와 B 모두 명목 5% 수준에서 A는 유의(p=0.039), B는 유의하지 않
 
 본 연구의 전체 코드와 실험 산출물은 다음에서 공개한다.
 
-> **저장소**: `[TODO: GitHub URL 기재]`
-> 라이선스: `[TODO]` · 커밋 해시: `[TODO]`
+> **저장소**: `https://github.com/godgeul-glitch/quant-methodology-audit`
+> 라이선스: `[TODO]` · 커밋 해시: `[TODO: 최종 커밋 후 기재]`
 
 외부 데이터는 모두 공개 출처에서 자동으로 수집되며 별도 구매가 필요 없다.
 

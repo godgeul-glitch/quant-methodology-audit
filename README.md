@@ -12,8 +12,8 @@
 
 | 설정 | AUC | p값 | 판정 |
 |---|---:|---:|---|
-| 결함을 모두 포함 (초기 구현) | [TODO] | [TODO] | [TODO] |
-| 결함을 모두 교정 | [TODO] | [TODO] | [TODO] |
+| 다른 결함은 교정, 생존편향·룩어헤드는 미교정 | 0.511 | 0.043 | **경계적 유의** |
+| 생존편향·룩어헤드까지 모두 교정 | 0.499 | 0.693 | 유의하지 않음 (무작위 이하) |
 
 같은 데이터, 같은 모델입니다. 바뀐 것은 방법론뿐입니다.
 
@@ -36,11 +36,13 @@ python simulate_falsepositive.py   # 검정 방식별 오탐률 (네트워크 �
 |---|---|---|---|
 | `stats_utils.py` | 3.1 | 초 | (자체 검증 출력) |
 | `simulate_falsepositive.py` | 4.2 | ~1분 | `simulate_falsepositive_results.csv` |
-| `ablation.py` | 4.1 | ~15분 | `ablation_results.csv` |
-| `experiment_universe.py` | 4.3 | ~15분 | `experiment_universe_results.csv` |
-| `experiment_multipletesting.py` | 4.4 | ~15분 | `experiment_multipletesting_results.csv` |
+| `ablation.py` | 4.1 | ~10분 | `ablation_results.csv` |
+| `experiment_universe.py` | 4.3 | ~30분 | `experiment_universe_results.csv` |
+| `experiment_multipletesting.py` | 4.4 | ~40분 | `experiment_multipletesting_results.csv` |
 | `experiment_survivorship.py` | 4.5 | ~10분 | `experiment_survivorship_results.csv` |
-| `experiment_stocksplit.py` | 4.6 | ~10분 | `experiment_stocksplit_results.csv` |
+| `experiment_stocksplit.py` | 4.6 | ~1시간 | `experiment_stocksplit_results.csv` |
+
+가격 데이터 이력이 5년→15년으로 늘면서(3장 참조), 초기 버전 대비 소요 시간이 전반적으로 늘었습니다. 여러 스크립트를 동시에 돌리면 자원 경쟁으로 각각 몇 배 더 느려질 수 있으니, 가능하면 순차 실행을 권장합니다.
 
 네트워크를 쓰는 스크립트는 첫 실행에서 종목별 재무·가격 데이터를 수집하므로 오래 걸립니다. 원본 재무제표는 캐싱되어 같은 프로세스 안에서 재사용됩니다.
 
