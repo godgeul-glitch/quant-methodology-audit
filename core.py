@@ -948,6 +948,32 @@ def build_value_panel(price_df: pd.DataFrame, fund_df: pd.DataFrame,
         logging.warning(f"Value panel failed for {ticker}: {e}")
         return pd.DataFrame()
 
+def build_swing_panel(tickers, df_all: pd.DataFrame, macro_prepared: pd.DataFrame, workers: int = 20) -> pd.DataFrame:
+    """논문 스윙 실험 공용 헬퍼: 여러 종목의 가격 기반(재무제표 없음) 패널을 병렬로 만들어 이어붙인다.
+
+    ⭐ [재현성] 결과를 종목별 dict에 담았다가 '정렬된 티커 순서'로 이어붙인다.
+    as_completed 순서(= 네트워크 응답 도착 순서)대로 붙이면 실행할 때마다 행
+    순서가 달라지고, 같은 날짜 안의 행 순서가 바뀌면서 RandomForest의 부트스트랩
+    표본이 달라져 AUC가 매번 미세하게 흔들린다. 논문 수치는 재현되어야 하므로
+    수집은 병렬로 하되 결합은 결정론적으로 한다.
+    """
+    results = {}
+    def one(tk):
+        try:
+            return tk, build_value_panel(df_all, None, macro_prepared, tk, include_fundamentals=False)
+        except Exception:
+            return tk, None
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for tk, p in ex.map(one, tickers):
+            if p is not None and not p.empty:
+                results[tk] = p
+    if not results:
+        return pd.DataFrame()
+    panel = pd.concat([results[t] for t in sorted(results)])
+    # 재현성: 날짜 우선, 같은 날짜 안에서는 티커 알파벳 순으로 고정
+    return panel.sort_values("Ticker", kind="mergesort").sort_index(kind="mergesort")
+
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=10)
 def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
                     pvalue_method: str = "fama_macbeth",

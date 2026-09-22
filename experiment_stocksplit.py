@@ -27,31 +27,11 @@ import argparse
 import sys
 sys.stdout.reconfigure(encoding="utf-8")
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
 
 import core
-
-
-def build_panel(tickers, df_all, macro_prepared, workers=20):
-    results = {}
-
-    def one(tk):
-        try:
-            return tk, core.build_value_panel(df_all, None, macro_prepared, tk, include_fundamentals=False)
-        except Exception:
-            return tk, None
-
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for tk, p in ex.map(one, tickers):
-            if p is not None and not p.empty:
-                results[tk] = p
-    if not results:
-        return pd.DataFrame()
-    panel = pd.concat([results[t] for t in sorted(results)])
-    return panel.sort_values("Ticker", kind="mergesort").sort_index(kind="mergesort")
 
 
 def main():
@@ -70,7 +50,7 @@ def main():
 
     print("전체 패널 생성 중 (한 번만; 이후 반복은 이 패널을 재사용)...")
     t0 = time.time()
-    panel = build_panel(pool, df_all, macro_prepared)
+    panel = core.build_swing_panel(pool, df_all, macro_prepared)
     print(f"  완료 ({time.time() - t0:.0f}초) · {len(panel):,}행 · "
           f"{panel['Ticker'].nunique()}종목\n")
 

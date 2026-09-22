@@ -29,7 +29,6 @@ import argparse
 import sys
 sys.stdout.reconfigure(encoding="utf-8")
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -45,36 +44,6 @@ CONFIGS = [
     ("⑤ 평가일 솎아내기(구 방식)",   "large", "fama_macbeth", "nonoverlap_iid"),
     ("전부 순진하게 (원래 상태)",    "small", "iid",          "nonoverlap_iid"),
 ]
-
-
-def build_panel(tickers, df_all, macro_prepared, workers=20):
-    """주어진 유니버스로 가격 기반 패널을 만듭니다(재무제표 조회 없음).
-
-    ⭐ [재현성] 결과를 종목별 dict에 담았다가 '정렬된 티커 순서'로 이어붙입니다.
-    as_completed 순서(= 네트워크 응답 도착 순서)대로 붙이면 실행할 때마다 행
-    순서가 달라지고, 같은 날짜 안의 행 순서가 바뀌면서 RandomForest의 부트스트랩
-    표본이 달라져 AUC가 매번 미세하게 흔들립니다. 논문 수치는 재현되어야 하므로
-    수집은 병렬로 하되 결합은 결정론적으로 합니다.
-    """
-    results = {}
-    def one(tk):
-        try:
-            p = core.build_value_panel(df_all, None, macro_prepared, tk, include_fundamentals=False)
-            return tk, p
-        except Exception:
-            return tk, None
-
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for tk, p in ex.map(one, tickers):
-            if p is not None and not p.empty:
-                results[tk] = p
-
-    ordered = [results[tk] for tk in sorted(results)]
-    if not ordered:
-        return pd.DataFrame()
-    panel = pd.concat(ordered)
-    # 날짜 우선, 같은 날짜 안에서는 티커 알파벳 순으로 고정
-    return panel.sort_values("Ticker", kind="mergesort").sort_index(kind="mergesort")
 
 
 def main():
@@ -106,7 +75,7 @@ def main():
         tickers = small if uni == "small" else large
         t0 = time.time()
         print(f"[{name}] 종목 {len(tickers)}개 · 패널 생성 중...", flush=True)
-        panel = build_panel(tickers, df_all, macro_prepared)
+        panel = core.build_swing_panel(tickers, df_all, macro_prepared)
         if panel.empty:
             rows.append((name, len(tickers), None, None, None, None, "패널 생성 실패"))
             print("   -> 패널 비어있음\n")
