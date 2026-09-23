@@ -80,7 +80,139 @@ def newey_west_se(x, lag):
     return float(np.sqrt(s / T))
 
 
-def fama_macbeth_auc(y_true, scores, dates, min_rows_per_date=5, nw_lag=0):
+_FIXED_B_NULL_CACHE = {}
+
+
+def _fixed_b_null(b, n_grid=500, n_draws=100000, seed=12345):
+    """Bartlett 커널 NW t통계량의 fixed-b 귀무분포를 몬테카를로로 만든다.
+
+    왜 필요한가:
+      Newey-West 표준오차에 정규/t 임계값을 쓰면, 대역폭(lag)이 표본 길이에 비해
+      무시할 수 없을 때 분산을 과소추정해 오탐이 늘어납니다(본 연구 시뮬레이션에서
+      명목 5%에 대해 8~10%). Kiefer & Vogelsang(2005)의 fixed-b 이론은
+      b = (lag+1)/T 를 고정한 채 극한분포를 구해 이 왜곡을 교정합니다.
+      극한분포는 닫힌 형태가 없으므로, iid 정규 시계열에 같은 b로 NW t통계량을
+      계산해 분포를 시뮬레이션합니다(고정 시드라 결정론적).
+    """
+    key = round(float(b), 3)   # b가 0.001 미만으로 달라지는 차이는 무시할 만함
+    if key in _FIXED_B_NULL_CACHE:
+        return _FIXED_B_NULL_CACHE[key]
+    lag = max(1, int(round(key * n_grid)) - 1)
+    rng = np.random.RandomState(seed)
+    out = []
+    for _ in range(n_draws // 5000):
+        z = rng.randn(5000, n_grid)
+        e = z - z.mean(axis=1, keepdims=True)
+        s = (e * e).sum(axis=1) / n_grid
+        for j in range(1, min(lag, n_grid - 1) + 1):
+            w = 1.0 - j / (lag + 1.0)
+            s += 2.0 * w * (e[:, j:] * e[:, :-j]).sum(axis=1) / n_grid
+        out.append(z.mean(axis=1) / np.sqrt(s / n_grid))
+    null = np.sort(np.concatenate(out))
+    _FIXED_B_NULL_CACHE[key] = null
+    return null
+
+
+def mean_test(x, nw_lag=0, fixed_b=False):
+    """시계열 x의 평균이 0과 다른지 검정. (mean, t, p_단측(>0), p_양측, T) 반환.
+
+    nw_lag=0 : 독립 가정, t분포(자유도 T-1)
+    nw_lag>0 : Newey-West(Bartlett) 표준오차. fixed_b=True면 fixed-b 임계분포,
+               아니면 t분포(자유도 T-1)로 p값을 구한다.
+    """
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    T = len(x)
+    nan = float("nan")
+    if T < 2:
+        return (float(x.mean()) if T else nan), nan, nan, nan, T
+    m = float(x.mean())
+    if nw_lag and nw_lag > 0:
+        se = newey_west_se(x, nw_lag)
+    else:
+        sd = float(np.std(x, ddof=1))
+        se = sd / np.sqrt(T) if sd > 0 else nan
+    if not np.isfinite(se) or se <= 0:
+        return m, nan, nan, nan, T
+    tstat = m / se
+    if nw_lag and nw_lag > 0 and fixed_b:
+        null = _fixed_b_null((min(int(nw_lag), T - 1) + 1) / T)
+        p_one = float(1.0 - np.searchsorted(null, tstat, side="left") / len(null))
+        p_two = float(np.mean(np.abs(null) >= abs(tstat)))
+    else:
+        p_one = float(1.0 - t_dist.cdf(tstat, df=T - 1))
+        p_two = float(2.0 * (1.0 - t_dist.cdf(abs(tstat), df=T - 1)))
+    return m, float(tstat), p_one, p_two, T
+
+
+def per_date_auc(y_true, scores, dates, min_rows_per_date=5):
+    """날짜별 AUC 시계열. 인덱스=날짜(오름차순)인 pandas Series."""
+    import pandas as pd
+    y = np.asarray(y_true, dtype=float)
+    s = np.asarray(scores, dtype=float)
+    d = np.asarray(dates)
+    mask = ~np.isnan(s)
+    y, s, d = y[mask], s[mask], d[mask]
+    if len(d) == 0:
+        return pd.Series(dtype=float)
+    # 한 번 정렬해 같은 날짜를 인접시킨 뒤 구간 슬라이스로 접근 (O(n log n))
+    order = np.argsort(d, kind="mergesort")
+    d_sorted, y_sorted, s_sorted = d[order], y[order], s[order]
+    bounds = np.flatnonzero(d_sorted[1:] != d_sorted[:-1]) + 1
+    starts = np.concatenate(([0], bounds))
+    ends = np.concatenate((bounds, [len(d_sorted)]))
+    idx, vals = [], []
+    for a, b in zip(starts, ends):
+        if (b - a) < min_rows_per_date:
+            continue
+        y_d = y_sorted[a:b]
+        if y_d.min() == y_d.max():       # 라벨이 한 종류뿐이면 AUC 정의 불가
+            continue
+        idx.append(d_sorted[a])
+        vals.append(fast_auc(y_d, s_sorted[a:b]))
+    return pd.Series(vals, index=idx, dtype=float)
+
+
+def paired_diff_test(series_a, series_b, nw_lag=0, fixed_b=False):
+    """두 조건의 날짜별 AUC 차이(a-b)를 공통 날짜에서 대응 검정한다.
+
+    왜 필요한가:
+      "A는 p=0.039로 유의, B는 p=0.088로 유의하지 않음"은 A와 B가 다르다는
+      증거가 아닙니다(Gelman & Stern 2006). 두 조건이 같은 평가일을 공유하면
+      날짜별 차이의 시계열을 직접 검정하는 것이 올바른 비교입니다.
+    Returns: (mean_diff, t, p_단측(a>b), p_양측, 공통날짜수)
+    """
+    common = series_a.index.intersection(series_b.index)
+    diff = (series_a.loc[common] - series_b.loc[common]).sort_index()
+    return mean_test(diff.values, nw_lag=nw_lag, fixed_b=fixed_b)
+
+
+def power_one_sided(delta, se, alpha=0.05):
+    """참효과가 delta, 표준오차가 se일 때 단측 z검정의 사전(a priori) 검정력.
+
+    관측된 효과를 그대로 넣는 '사후 검정력'은 p값의 재표현일 뿐이라
+    (Hoenig & Heisey 2001) 쓰지 않습니다. 여기서는 효과 크기를 미리 가정합니다.
+    """
+    return float(1.0 - norm.cdf(norm.ppf(1.0 - alpha) - delta / se))
+
+
+def min_detectable_effect(se, alpha=0.05, power=0.80):
+    """단측 검정에서 주어진 검정력으로 검출 가능한 최소 효과(MDE)."""
+    return float((norm.ppf(1.0 - alpha) + norm.ppf(power)) * se)
+
+
+def fama_macbeth_detail(y_true, scores, dates, min_rows_per_date=5,
+                        nw_lag=0, fixed_b=False):
+    """fama_macbeth_auc의 상세판. 날짜별 AUC 시계열과 양측 p값까지 dict로 반환."""
+    series = per_date_auc(y_true, scores, dates, min_rows_per_date)
+    if len(series) == 0:
+        nan = float("nan")
+        return {"mean_auc": nan, "t": nan, "p": nan, "p_two": nan, "T": 0, "series": series}
+    m, t, p1, p2, T = mean_test(series.values - 0.5, nw_lag=nw_lag, fixed_b=fixed_b)
+    return {"mean_auc": m + 0.5, "t": t, "p": p1, "p_two": p2, "T": T, "series": series}
+
+
+def fama_macbeth_auc(y_true, scores, dates, min_rows_per_date=5, nw_lag=0, fixed_b=False):
     """날짜별 AUC를 구한 뒤 그 시계열을 t검정합니다.
 
     왜 이렇게 해야 하는가:
@@ -95,61 +227,17 @@ def fama_macbeth_auc(y_true, scores, dates, min_rows_per_date=5, nw_lag=0):
       0보다 크면 Newey-West로 자기상관을 보정합니다. 평가일을 솎아내지 않고
       전부 쓰는 경우 반드시 필요하며, 보통 lag = 예측기간(겹침 길이)으로 둡니다.
 
+    fixed_b:
+      True면 NW t통계량의 p값을 fixed-b 임계분포로 구합니다(Kiefer & Vogelsang 2005).
+      대역폭이 표본 길이에 비해 작지 않을 때 t분포 임계값은 낙관적입니다.
+
     Returns:
-        (mean_auc, tstat, pvalue, n_dates)
+        (mean_auc, tstat, pvalue, n_dates)   pvalue는 단측(AUC > 0.5) 검정.
         검정이 불가능하면 tstat/pvalue는 nan.
     """
-    y = np.asarray(y_true, dtype=float)
-    s = np.asarray(scores, dtype=float)
-    d = np.asarray(dates)
-
-    mask = ~np.isnan(s)
-    y, s, d = y[mask], s[mask], d[mask]
-
-    # ⭐ [성능] 날짜별로 나눌 때 매번 `d == dt` 마스크를 만들면 전체 행을 날짜
-    # 수만큼 반복 훑게 되어 O(행수 × 날짜수)가 됩니다. 평가일 300개 × 15만 행
-    # 규모에서 이것만으로 수천만 번의 비교가 발생합니다.
-    # 한 번 정렬해 같은 날짜를 인접시킨 뒤 구간 슬라이스로 접근하면
-    # O(행수 log 행수)로 끝납니다. 결과는 동일합니다.
-    order = np.argsort(d, kind="mergesort")   # 안정 정렬: 같은 날짜 내 순서 보존
-    d_sorted, y_sorted, s_sorted = d[order], y[order], s[order]
-    # 날짜가 바뀌는 경계 위치
-    if len(d_sorted) == 0:
-        return float("nan"), float("nan"), float("nan"), 0
-    bounds = np.flatnonzero(d_sorted[1:] != d_sorted[:-1]) + 1
-    starts = np.concatenate(([0], bounds))
-    ends = np.concatenate((bounds, [len(d_sorted)]))
-
-    per_date = []
-    for a, b in zip(starts, ends):            # 날짜 오름차순. NW는 순서가 중요.
-        y_d = y_sorted[a:b]
-        if (b - a) < min_rows_per_date:
-            continue
-        # 라벨이 한 종류뿐이면 AUC가 정의되지 않음 (min/max 비교가 unique보다 빠름)
-        if y_d.min() == y_d.max():
-            continue
-        per_date.append(fast_auc(y_d, s_sorted[a:b]))
-
-    T = len(per_date)
-    if T == 0:
-        return float("nan"), float("nan"), float("nan"), 0
-    mean_auc = float(np.mean(per_date))
-    if T < 2:
-        return mean_auc, float("nan"), float("nan"), T
-
-    if nw_lag and nw_lag > 0:
-        se = newey_west_se(per_date, nw_lag)
-    else:
-        sd = float(np.std(per_date, ddof=1))
-        se = sd / np.sqrt(T) if sd > 0 else float("nan")
-    if not np.isfinite(se) or se <= 0:
-        return mean_auc, float("nan"), float("nan"), T
-
-    tstat = (mean_auc - 0.5) / se
-    # 자유도는 관례대로 T-1을 씁니다. 겹침이 있으면 '유효 표본'은 T보다 작으므로
-    # 이 검정도 여전히 다소 낙관적일 수 있다는 점은 논문에 명시할 것.
-    pval = float(1.0 - t_dist.cdf(tstat, df=T - 1))
-    return mean_auc, float(tstat), pval, T
+    r = fama_macbeth_detail(y_true, scores, dates, min_rows_per_date,
+                            nw_lag=nw_lag, fixed_b=fixed_b)
+    return r["mean_auc"], r["t"], r["p"], r["T"]
 
 
 def _make_panel(n_dates, n_stocks, signal_strength, seed, date_effect_sd=0.0):
@@ -270,6 +358,33 @@ def _demo():
           f"iid 오탐 {fp_iid}/{trials}, Newey-West 오탐 {fp_nw}/{trials}")
     assert fp_nw <= fp_iid, (
         f"NW 보정이 iid보다 오탐이 많으면 안 됨 (iid {fp_iid}, NW {fp_nw})")
+
+    # 6) 대역폭을 3h로 넓히고 fixed-b 임계분포를 쓰면 오탐이 더 줄어야 함.
+    fp_fb = 0
+    for seed in range(trials):
+        y, s, d = _make_overlapping_panel(n_days=260, n_stocks=120, horizon=H, seed=seed)
+        _, _, p_fb, _ = fama_macbeth_auc(y, s, d, nw_lag=3 * H, fixed_b=True)
+        if np.isfinite(p_fb) and p_fb <= 0.05:
+            fp_fb += 1
+    print(f"[겹치는 구간·신호없음] NW(lag 3h)+fixed-b 오탐 {fp_fb}/{trials}")
+    assert fp_fb <= fp_nw, f"fixed-b가 NW(lag h)보다 오탐이 많음 ({fp_fb} vs {fp_nw})"
+
+    # 7) 대응 차이 검정: 같은 날짜에서 신호가 강한 점수 vs 약한 점수는 구별되어야 하고,
+    #    같은 점수끼리는 차이가 0이어야 함.
+    rng = np.random.RandomState(7)
+    y, s, d = _make_panel(n_dates=60, n_stocks=200, signal_strength=0.3, seed=3)
+    noisy = s + rng.randn(len(s)) * 3.0          # 신호를 희석한 점수
+    sa, sb = per_date_auc(y, s, d), per_date_auc(y, noisy, d)
+    md, tt, p1, p2, Tc = paired_diff_test(sa, sb)
+    assert Tc == 60 and md > 0 and p2 < 0.01, f"강/약 신호 차이를 못 잡음: diff={md}, p={p2}"
+    md0, _, _, _, _ = paired_diff_test(sa, sa)
+    assert md0 == 0.0, "같은 시계열의 차이는 0이어야 함"
+    print(f"[대응 차이 검정] 강-약 신호 차이 {md:+.3f}, t={tt:.2f}, 양측 p={p2:.2g}")
+
+    # 8) 사전 검정력: 효과 0이면 검정력=유의수준, MDE에서는 검정력 80%
+    assert abs(power_one_sided(0.0, 0.01) - 0.05) < 1e-9
+    assert abs(power_one_sided(min_detectable_effect(0.01), 0.01) - 0.80) < 1e-9
+    print("[검정력] 효과 0 → 5%, MDE → 80% 확인")
 
     print("\n자체 점검 통과")
 

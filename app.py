@@ -633,7 +633,8 @@ with tab2:
                     logging.warning(f"CS model step failed: {e}")
                 if _cs:
                     result_df["종목 비교 점수"] = result_df["Ticker"].map(_cs["scores"]).round(0)
-                    st.session_state["cs_meta"] = {"auc": _cs["auc"], "pvalue": _cs["pvalue"], "n_eval": _cs["n_eval"]}
+                    st.session_state["cs_meta"] = {"auc": _cs["auc"], "pvalue": _cs["pvalue"], "n_eval": _cs["n_eval"],
+                                                   "n_dates": _cs.get("n_dates", 0)}
                 else:
                     st.session_state["cs_meta"] = None
                 
@@ -911,7 +912,8 @@ with tab2:
             st.caption(
                 f"🆚 **종목 비교 점수**: 전 종목을 한 모델로 묶어 '같은 날 다른 종목보다 잘할까'를 예측한 값입니다 "
                 f"(0~100, 높을수록 상대적으로 유리). 종목별 개별 모델의 표본 부족 문제를 보완합니다. "
-                f"— 검증 AUC {_csm['auc']:.2f} ({_sig_txt}, 평가 {_csm['n_eval']}건)"
+                f"— 검증 AUC {_csm['auc']:.2f} ({_sig_txt}, 독립 평가일 {_csm.get('n_dates', 0)}개 · "
+                f"{_csm['n_eval']}건)"
             )
 
         st.caption(

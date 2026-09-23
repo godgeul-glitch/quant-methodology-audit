@@ -6,10 +6,6 @@
 일반적 관계 대신, **"이 종목은 대체로 평균을 이긴다"는 종목별 습성**을 외워도
 평가에서 점수를 받습니다. 실전에서 새로운 종목에 적용하면 무용지물이죠.
 
-무작위 유니버스 실험에서 42종목(AUC 중앙값 0.528)이 501종목(0.514)보다
-체계적으로 높게 나온 것도 이걸로 설명될 수 있습니다. 종목이 적을수록 외우기
-쉬우니까요.
-
 [방법 - 학습을 고정하고 평가 종목만 바꾸는 통제 실험]
   유니버스를 무작위로 절반씩 S1, S2로 나눈 뒤
     조건 A(본 종목)  : S1으로 학습 -> S1으로 평가
@@ -32,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 import core
+from stats_utils import paired_diff_test
 
 
 def main():
@@ -40,12 +37,10 @@ def main():
     args = ap.parse_args()
 
     pool = sorted(set(core.VALUE_UNIVERSE_TICKERS) | set(core.ALL_TICKERS))
-    start_date = (pd.Timestamp.today() - pd.DateOffset(years=core.SWING_YEARS)).strftime("%Y-%m-%d")
 
-    print("가격·매크로 수집 중...")
+    print(f"가격·매크로 로드 ({core.SWING_START} ~ {core.SWING_END}, 스냅샷)...")
     t0 = time.time()
-    df_all = core.download_all_data(tuple(pool), start_date)
-    macro_prepared = core.prepare_macro(core.download_macro_data(start_date))
+    df_all, macro_prepared = core.load_swing_data(pool)
     print(f"  완료 ({time.time() - t0:.0f}초)")
 
     print("전체 패널 생성 중 (한 번만; 이후 반복은 이 패널을 재사용)...")
@@ -71,16 +66,19 @@ def main():
         if (not seen or "error" in seen) or (not unseen or "error" in unseen):
             continue
 
+        # 같은 평가일에서 날짜별 AUC 차이를 대응 검정 (분할 1회 안에서의 차이)
+        md, dt, _, dp, _ = paired_diff_test(seen["per_date_auc"], unseen["per_date_auc"],
+                                            nw_lag=seen["nw_lag"], fixed_b=True)
         rows.append({
-            "seen_auc": seen["auc"], "seen_t": seen.get("fm_tstat", np.nan),
-            "seen_p": seen["pvalue"],
-            "unseen_auc": unseen["auc"], "unseen_t": unseen.get("fm_tstat", np.nan),
-            "unseen_p": unseen["pvalue"],
-            "gap": seen["auc"] - unseen["auc"],
+            "seen_auc": seen["fm_auc"], "seen_t": seen["fm_tstat"],
+            "seen_p": seen["pvalue_two_sided"],
+            "unseen_auc": unseen["fm_auc"], "unseen_t": unseen["fm_tstat"],
+            "unseen_p": unseen["pvalue_two_sided"],
+            "gap": md, "gap_t": dt, "gap_p": dp,
         })
-        print(f"  {i+1}/{args.n}  본 종목 AUC {seen['auc']:.3f} (p {seen['pvalue']:.3f}) | "
-              f"안 본 종목 AUC {unseen['auc']:.3f} (p {unseen['pvalue']:.3f}) | "
-              f"차이 {rows[-1]['gap']:+.3f}", flush=True)
+        print(f"  {i+1}/{args.n}  본 종목 AUC {seen['fm_auc']:.4f} (p {seen['pvalue_two_sided']:.3f}) | "
+              f"안 본 종목 AUC {unseen['fm_auc']:.4f} (p {unseen['pvalue_two_sided']:.3f}) | "
+              f"차이 {md:+.4f} (대응 p {dp:.3f})", flush=True)
 
     if not rows:
         print("유효한 결과가 없습니다.")
@@ -100,10 +98,12 @@ def main():
     print(f"  차이(본 - 안 본)            : {df['gap'].mean():+.3f} "
           f"(표준편차 {df['gap'].std():.3f})")
 
-    # 차이가 0인지 대응표본 t검정
+    # 차이가 0인지 대응표본 t검정 (분할 간 검정. 분할들은 같은 데이터를 공유하므로
+    # 서로 독립이 아니다 - 보조 지표로만 쓰고, 분할별 대응 검정의 유의 비율을 함께 본다)
     from scipy.stats import ttest_rel
     tt = ttest_rel(df["seen_auc"], df["unseen_auc"])
-    print(f"  대응표본 t검정               : t={tt.statistic:+.2f}, p={tt.pvalue:.4f}")
+    print(f"  대응표본 t검정(분할 간)       : t={tt.statistic:+.2f}, p={tt.pvalue:.4f}")
+    print(f"  분할별 날짜 대응 검정 p<0.05  : {(df['gap_p'] <= 0.05).sum()}/{len(df)}회")
     print("-" * 76)
     if tt.pvalue <= 0.05 and df["gap"].mean() > 0:
         print("  해석: 학습에서 본 종목일 때 성능이 유의하게 높음")

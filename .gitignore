@@ -1,5 +1,6 @@
 # Python
 venv/
+.venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -18,3 +19,6 @@ sp500_historical_components.csv
 Thumbs.db
 .vscode/
 .idea/
+
+# 논문 실험용 가격 스냅샷 (core.load_price_snapshot)
+data_cache/

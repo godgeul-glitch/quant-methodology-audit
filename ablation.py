@@ -16,8 +16,14 @@
 
 [측정하는 결함]
   ① p값 계산       : 행(종목×날짜)을 독립 표본으로 셈 (iid 가정)
-  ② 소표본 유니버스 : 종목 41개 (vs S&P500 확장)
+  ② 소표본 유니버스 : 손으로 고른 관심종목 42개 (vs S&P500 확장)
   ⑤ 평가일 솎아내기 : 라벨이 겹치지 않도록 evaluation date를 horizon 간격으로 솎음
+
+[개정: 판정과 비교 방식]
+  - 판정은 양측 p값 기준입니다(단측 p도 함께 기록).
+  - 기준선과의 차이는 'p값이 유의/비유의로 갈렸는가'가 아니라, 같은 평가일의
+    날짜별 AUC 차이를 대응 검정(NW + fixed-b)해서 판단합니다.
+  - '검정만 구 방식' 행: 대역폭 h + t분포(개정 전 기본 검정)로 p값만 다시 계산.
 
 [측정하지 못하는 결함 - 논문에 명시할 것]
   ⑧ 생존 편향·지수 편입일 룩어헤드 : experiment_survivorship.py에서 별도 측정.
@@ -33,16 +39,19 @@ import time
 import numpy as np
 import pandas as pd
 
+from stats_utils import paired_diff_test
+
 import core
 
 # 결함을 하나씩만 켜는 설정들. 첫 줄이 '전부 올바른' 기준선입니다.
 CONFIGS = [
-    # (이름, universe, pvalue_method, eval_mode)
-    ("기준선 (전부 수정됨)",       "large", "fama_macbeth", "overlap_nw"),
-    ("① p값만 iid 가정",           "large", "iid",          "overlap_nw"),
-    ("② 소표본 유니버스(41종목)",   "small", "fama_macbeth", "overlap_nw"),
-    ("⑤ 평가일 솎아내기(구 방식)",   "large", "fama_macbeth", "nonoverlap_iid"),
-    ("전부 순진하게 (원래 상태)",    "small", "iid",          "nonoverlap_iid"),
+    # (이름, universe, run_value_model 추가 인자)
+    ("기준선 (⑧ 제외 전부 교정)",       "large", {}),
+    ("검정만 구 방식 (NW lag=h, t분포)", "large", {"nw_lag_mult": 1, "fixed_b": False}),
+    ("① p값만 iid 가정",                "large", {"pvalue_method": "iid"}),
+    ("② 소표본 유니버스",               "small", {}),
+    ("⑤ 평가일 솎아내기(구 방식)",       "large", {"eval_mode": "nonoverlap_iid"}),
+    ("전부 순진하게 (원래 상태)",        "small", {"pvalue_method": "iid", "eval_mode": "nonoverlap_iid"}),
 ]
 
 
@@ -51,7 +60,7 @@ def main():
     ap.add_argument("--quick", action="store_true", help="종목 수를 줄여 빠르게 점검")
     args = ap.parse_args()
 
-    small = list(core.ALL_TICKERS)
+    small = sorted(set(core.ALL_TICKERS))
     large = sorted(set(core.VALUE_UNIVERSE_TICKERS) | set(core.ALL_TICKERS))
     if args.quick:
         # 소표본 대비 효과를 보려면 두 유니버스 크기 차이는 유지해야 함
@@ -59,65 +68,52 @@ def main():
         large = large[:60]
         print(f"[quick] 소표본 {len(small)}종목 / 확장 {len(large)}종목으로 축소 실행\n")
 
-    start_date = (pd.Timestamp.today() - pd.DateOffset(years=core.SWING_YEARS)).strftime("%Y-%m-%d")
-
-    print(f"가격·매크로 데이터 수집 중 ({core.SWING_YEARS}년)...")
+    print(f"가격·매크로 데이터 로드 ({core.SWING_START} ~ {core.SWING_END}, 스냅샷)...")
     t0 = time.time()
-    df_all = core.download_all_data(tuple(large), start_date)
-    macro_prepared = core.prepare_macro(core.download_macro_data(start_date))
+    df_all, macro_prepared = core.load_swing_data(large)
     if df_all.empty:
         print("가격 데이터를 받지 못했습니다. 잠시 후 다시 시도하세요.")
         sys.exit(1)
     print(f"  완료 ({time.time() - t0:.0f}초)\n")
 
-    rows = []
-    for name, uni, pmethod, emode in CONFIGS:
+    panels = {}
+    rows, base = [], None
+    for name, uni, kw in CONFIGS:
         tickers = small if uni == "small" else large
         t0 = time.time()
-        print(f"[{name}] 종목 {len(tickers)}개 · 패널 생성 중...", flush=True)
-        panel = core.build_swing_panel(tickers, df_all, macro_prepared)
-        if panel.empty:
-            rows.append((name, len(tickers), None, None, None, None, "패널 생성 실패"))
-            print("   -> 패널 비어있음\n")
-            continue
-
-        res = core.run_value_model(panel, horizon_override=core.SWING_HORIZON,
-                                   pvalue_method=pmethod, eval_mode=emode,
-                                   require_fundamentals=False)
+        if uni not in panels:
+            print(f"[{uni}] 종목 {len(tickers)}개 · 패널 생성 중...", flush=True)
+            panels[uni] = core.build_swing_panel(tickers, df_all, macro_prepared)
+        panel = panels[uni]
+        n_tk = panel["Ticker"].nunique() if not panel.empty else 0
+        res = (core.run_value_model(panel, horizon_override=core.SWING_HORIZON,
+                                    require_fundamentals=False, **kw)
+               if not panel.empty else {"error": "패널 비어있음"})
         if res is None or "error" in res:
-            rows.append((name, len(tickers), None, None, None, None,
-                         f"모델 실패: {res.get('error', '?') if res else '?'}"))
-            print(f"   -> {res.get('error') if res else '실패'}\n")
+            print(f"[{name}] -> {res.get('error') if res else '실패'}\n")
+            rows.append({"설정": name, "종목수": n_tk, "판정": "실패"})
             continue
+        if base is None:
+            base = res
+        # 기준선과의 대응 차이 검정 (공통 평가일)
+        if res is base:
+            d_auc = dt = dp = np.nan
+        else:
+            d_auc, dt, _, dp, _ = paired_diff_test(res["per_date_auc"], base["per_date_auc"],
+                                                   nw_lag=base["nw_lag"], fixed_b=True)
+        p2 = res["pvalue_two_sided"]
+        verdict = "유의" if (np.isfinite(p2) and p2 <= 0.05) else "유의하지 않음"
+        rows.append({"설정": name, "종목수": n_tk, "AUC": res["fm_auc"], "t값": res["fm_tstat"],
+                     "p단측": res["pvalue"], "p양측": p2, "독립날짜": res["fm_n_dates"],
+                     "ΔAUC(대 기준선)": d_auc, "차이 t": dt, "차이 p양측": dp, "판정": verdict})
+        print(f"[{name}] {n_tk}종목 · {core.fmt_result(res)} · {verdict}"
+              + (f"\n     기준선 대비 ΔAUC {d_auc:+.4f} (대응 t {dt:+.2f}, 양측 p {dp:.3f})"
+                 if np.isfinite(d_auc) else "")
+              + f"  ({time.time() - t0:.0f}초)\n", flush=True)
 
-        auc = res["auc"]
-        pval = res["pvalue"]
-        fm_T = res.get("fm_n_dates", 0)
-        fm_t = res.get("fm_tstat", float("nan"))
-        verdict = ("유의" if (np.isfinite(pval) and pval <= 0.05) else "유의하지 않음")
-        rows.append((name, len(tickers), auc, fm_t, pval, fm_T, verdict))
-        print(f"   -> AUC {auc:.3f} · t {fm_t if np.isfinite(fm_t) else float('nan'):.2f} "
-              f"· p {pval:.4f} · 독립날짜 {fm_T}개 · {verdict}  ({time.time() - t0:.0f}초)\n")
-
-    print("\n" + "=" * 92)
-    print("결함별 기여도 (one-at-a-time ablation, 스윙/가격 기반)")
-    print("=" * 92)
-    hdr = f"{'설정':<28}{'종목':>6}{'AUC':>8}{'t값':>9}{'p값':>10}{'독립날짜':>9}  판정"
-    print(hdr)
-    print("-" * 92)
-    for name, n, auc, t, p, T, verdict in rows:
-        if auc is None:
-            print(f"{name:<28}{n:>6}{'-':>8}{'-':>9}{'-':>10}{'-':>9}  {verdict}")
-            continue
-        t_txt = f"{t:+.2f}" if (t is not None and np.isfinite(t)) else "-"
-        p_txt = f"{p:.4f}" if (p is not None and np.isfinite(p)) else "-"
-        print(f"{name:<28}{n:>6}{auc:>8.3f}{t_txt:>9}{p_txt:>10}{T:>9}  {verdict}")
-    print("-" * 92)
-    print("해석: 기준선 대비 특정 행에서 AUC가 높아지거나 p값이 작아졌다면,")
-    print("      그 차이는 시장의 신호가 아니라 '그 결함이 만들어낸 착시'입니다.")
-    print("주의: 생존 편향(현재 지수 구성종목으로 과거 학습)은 이 표로 측정 불가 — experiment_survivorship.py 참조.")
-
-    out = pd.DataFrame(rows, columns=["설정", "종목수", "AUC", "t값", "p값", "독립날짜", "판정"])
+    print("주: ①은 AUC·날짜별 시계열이 기준선과 같고 p값만 다르므로 ΔAUC가 0입니다.")
+    print("주: 생존 편향(현재 지수 구성종목으로 과거 학습)은 이 표로 측정 불가 — experiment_survivorship.py 참조.")
+    out = pd.DataFrame(rows)
     out.to_csv("ablation_results.csv", index=False, encoding="utf-8-sig")
     print("\n저장: ablation_results.csv")
 

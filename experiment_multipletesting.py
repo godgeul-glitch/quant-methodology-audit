@@ -6,9 +6,11 @@
 그리고 **제일 잘 나온 설정을 논문에 싣습니다.** 이 과정에서 보고되는 p값은
 더 이상 5% 유의수준을 의미하지 않습니다(다중검정 문제).
 
-앞선 실험에서 이 데이터의 검정력은 약 25%로 추정됐습니다. 즉 한 번 돌려서
-유의하게 나올 확률이 원래 25% 정도라는 뜻인데, 여러 번 시도하면 그중 하나가
-유의할 확률은 훨씬 높아집니다.
+검정력이 낮은 데이터에서 여러 설정을 시도하면, 그중 하나가 우연히 유의할
+확률은 명목 유의수준보다 훨씬 높아집니다.
+
+판정은 양측 p값 기준이며, 사전 설정의 결과에서 지표별 단독 AUC(신호의 방향)도
+함께 저장합니다(experiment_feature_direction.csv).
 
 [방법]
 연구자가 실제로 만질 법한 손잡이들을 조합해 N개 설정을 돌리고
@@ -62,12 +64,10 @@ def make_variants():
 
 def main():
     pool = sorted(set(core.VALUE_UNIVERSE_TICKERS) | set(core.ALL_TICKERS))
-    start_date = (pd.Timestamp.today() - pd.DateOffset(years=core.SWING_YEARS)).strftime("%Y-%m-%d")
 
-    print("가격·매크로 수집 중...")
+    print(f"가격·매크로 로드 ({core.SWING_START} ~ {core.SWING_END}, 스냅샷)...")
     t0 = time.time()
-    df_all = core.download_all_data(tuple(pool), start_date)
-    macro_prepared = core.prepare_macro(core.download_macro_data(start_date))
+    df_all, macro_prepared = core.load_swing_data(pool)
     print(f"  완료 ({time.time() - t0:.0f}초)")
 
     print("패널 생성 중 (한 번만)...")
@@ -93,12 +93,17 @@ def main():
         if not res or "error" in res:
             print(f"  [{i:2d}/{len(variants)}] {v['label']:<34} 실패")
             continue
-        rows.append({"label": v["label"], "auc": res["auc"],
-                     "t": res.get("fm_tstat", np.nan), "p": res["pvalue"],
-                     "T": res.get("fm_n_dates", 0)})
-        star = " ***" if res["pvalue"] <= 0.05 else ""
+        rows.append({"label": v["label"], "auc": res["fm_auc"],
+                     "t": res["fm_tstat"], "p": res["pvalue_two_sided"],
+                     "p_one": res["pvalue"], "T": res["fm_n_dates"]})
+        if v["label"] == "전체 지표 · 1개월 · 깊이3":
+            fdir = [{"지표": k, "단독AUC": a, "t": t, "p양측": 2 * min(p1, 1 - p1), "날짜": T}
+                    for k, (a, t, p1, T) in res["feature_fm"].items()]
+            pd.DataFrame(fdir).to_csv("experiment_feature_direction.csv", index=False,
+                                      encoding="utf-8-sig")
+        star = " ***" if res["pvalue_two_sided"] <= 0.05 else ""
         print(f"  [{i:2d}/{len(variants)}] {v['label']:<34} "
-              f"AUC {res['auc']:.3f} · p {res['pvalue']:.4f}{star}", flush=True)
+              f"AUC {res['fm_auc']:.4f} · p(양측) {res['pvalue_two_sided']:.4f}{star}", flush=True)
 
     if not rows:
         print("유효한 결과가 없습니다.")
@@ -125,6 +130,7 @@ def main():
           f"AUC {best['auc']:.3f} · p {best['p']:.4f} "
           f"({'유의' if best['p'] <= 0.05 else '유의하지 않음'})")
     print(f"     -> 그 설정: {best['label']}")
+    print(f"     -> {len(df)}개 시도를 감안한 Bonferroni 보정 p: {min(1.0, best['p'] * len(df)):.4f}")
     print()
     print(f"  p<0.05를 주는 설정 : {n_sig}/{len(df)}개 ({n_sig/len(df)*100:.0f}%)")
     print(f"  p값 중앙값         : {p.median():.3f}")

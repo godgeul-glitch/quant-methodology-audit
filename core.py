@@ -5,9 +5,12 @@ app.py에서 분리한 이유: 논문용 재현 스크립트(ablation.py)가 이
 실행돼 버려서 불가능했습니다. 여기에는 데이터 수집·피처 생성·모델·검정만
 두고, 화면에 그리는 코드는 app.py에 남깁니다.
 
-주의: @st.cache_data 데코레이터는 그대로 두었습니다. Streamlit 런타임 밖에서
-호출해도 동작하며(캐시 없이 그냥 실행), app.py에서 쓸 때는 캐시가 살아납니다.
+주의: 캐시는 `_cache_data`(아래 정의)로 겁니다. Streamlit 런타임 안(app.py)에서는
+st.cache_data가 그대로 동작하고, 실험 스크립트처럼 런타임 밖에서는 캐시를 건너뜁니다.
+런타임 밖에서 st.cache_data를 쓰면 호출마다 큰 패널 DataFrame을 해싱하느라 느려지고
+경고가 쏟아지기 때문입니다.
 """
+import functools
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -23,7 +26,7 @@ import inspect
 from datetime import date
 from scipy.optimize import minimize_scalar
 from scipy.stats import norm
-from stats_utils import fama_macbeth_auc
+from stats_utils import fama_macbeth_auc, fama_macbeth_detail
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import roc_auc_score, precision_score
@@ -42,6 +45,31 @@ except ImportError:
     get_script_run_ctx = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# 런타임 밖(실험 스크립트)에서 st.cache_data를 데코레이트할 때 나오는 경고는 무의미하므로 숨긴다.
+logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
+
+
+def _in_streamlit_runtime() -> bool:
+    try:
+        from streamlit.runtime import exists
+        return bool(exists())
+    except Exception:
+        return False
+
+
+def _cache_data(**kwargs):
+    """Streamlit 런타임 안에서만 st.cache_data를 적용하는 데코레이터."""
+    def deco(fn):
+        cached = st.cache_data(**kwargs)(fn)
+
+        @functools.wraps(fn)
+        def wrapper(*a, **k):
+            if _in_streamlit_runtime():
+                return cached(*a, **k)
+            return fn(*a, **k)
+        wrapper.clear = cached.clear
+        return wrapper
+    return deco
 
 # ============================================================
 # 🔧 코드 리뷰 / 수정 내역 요약
@@ -114,6 +142,22 @@ AUTO_YEARS = 5           # 표본 수와 최신 시장 반영의 균형점
 # 라이브 앱(AUTO_YEARS)과는 별개 상수로, 앱의 기존 동작에는 영향을 주지 않는다.
 SWING_YEARS = 15
 SWING_HORIZON = 21  # ~1개월. 4.4절에서 유의성이 몰려 있던 구간.
+# ⭐ [재현성] 분석 기간을 고정한다. 예전에는 '오늘 - 15년'을 시작일로 써서
+# 스크립트를 돌린 날짜마다 기간이 하루씩 달라졌고, 그 결과 같은 설정인데도
+# 4.1절(p=0.043)과 4.4절(p=0.051)의 수치가 어긋났다. yfinance의 end는 배타적이라
+# 2026-09-22로 두면 2026-09-21 종가까지 포함된다.
+SWING_START = "2011-09-21"
+SWING_END = "2026-09-22"
+# ⭐ Newey-West 대역폭 = 예측기간 × 3, p값은 fixed-b 임계분포.
+# 참효과 0 합성 패널(평가일 2,742개·예측기간 21일, 600회)에서
+#   lag=h, t분포: 오탐 8.7%  /  lag=3h, fixed-b: 5.3%  (명목 5%)
+# 로 교정되어 이 조합을 기본값으로 쓴다 (simulate_falsepositive.py 사례 3).
+NW_LAG_MULT = 3
+NW_FIXED_B = True
+# RandomForest 병렬 수. 앱은 종목 분석을 스레드로 병렬 처리하므로 1을 유지하고,
+# 실험 스크립트는 환경변수 QUANT_RF_JOBS=-1 등으로 늘린다. random_state가 고정돼
+# 있어 n_jobs를 바꿔도 학습 결과는 동일하다.
+RF_N_JOBS = int(os.environ.get("QUANT_RF_JOBS", "1"))
 AUTO_PROB_THRESHOLD = 0.38   # 상승 신호로 인정하는 최소 확률
 AUTO_HALF_KELLY = 0.5        # 하프 켈리(권장 안전 배수)
 AUTO_KELLY_CAP = 25.0        # 한 종목 최대 투자 비중 상한(%)
@@ -404,11 +448,11 @@ def get_calibrated_cv(base_model, cv):
 # ==========================================
 # 1. 데이터 수집 및 피처 엔지니어링 / 라벨링
 # ==========================================
-@st.cache_data(show_spinner=False, ttl=900)
-def download_all_data(tickers: tuple, start_date: str):
+@_cache_data(show_spinner=False, ttl=900)
+def download_all_data(tickers: tuple, start_date: str, end_date: str = None):
     for attempt in range(3):
         try:
-            df = yf.download(list(tickers), start=start_date, group_by='ticker', auto_adjust=True, progress=False)
+            df = yf.download(list(tickers), start=start_date, end=end_date, group_by='ticker', auto_adjust=True, progress=False)
             if not df.empty:
                 return df
         except Exception as e:
@@ -416,11 +460,11 @@ def download_all_data(tickers: tuple, start_date: str):
         time.sleep(1.0 * (attempt + 1))
     return pd.DataFrame()
 
-@st.cache_data(show_spinner=False, ttl=900)
-def download_macro_data(start_date: str):
+@_cache_data(show_spinner=False, ttl=900)
+def download_macro_data(start_date: str, end_date: str = None):
     for attempt in range(3):
         try:
-            df = yf.download(MACRO_TICKERS, start=start_date, group_by='ticker', auto_adjust=True, progress=False)
+            df = yf.download(MACRO_TICKERS, start=start_date, end=end_date, group_by='ticker', auto_adjust=True, progress=False)
             if not df.empty:
                 return df
         except Exception as e:
@@ -428,7 +472,79 @@ def download_macro_data(start_date: str):
         time.sleep(1.0 * (attempt + 1))
     return pd.DataFrame()
 
-@st.cache_data(show_spinner=False, ttl=900)
+def _snapshot_path(kind: str, start_date: str, end_date: str) -> str:
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_cache")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"{kind}_{start_date}_{end_date}.pkl")
+
+
+def load_price_snapshot(tickers, start_date: str = SWING_START, end_date: str = SWING_END,
+                        chunk: int = 200) -> pd.DataFrame:
+    """논문 실험 공용 가격 스냅샷. 한 번 받은 가격을 data_cache/에 저장해 재사용한다.
+
+    ⭐ [재현성] Yahoo 데이터는 수시로 갱신·소급 수정되므로, 실험마다 따로 받으면
+    같은 설정이라도 수치가 어긋난다. 모든 실험이 같은 스냅샷을 쓰게 해서 절(節) 사이
+    수치가 일치하도록 한다. 가격이 한 건도 없는 티커(상장폐지 등)는 따로 기록해
+    다시 요청하지 않는다.
+
+    반환: 열이 (티커, OHLCV) MultiIndex인 DataFrame. 가격이 없는 티커는 포함하지 않는다.
+    """
+    path = _snapshot_path("prices", start_date, end_date)
+    if os.path.exists(path):
+        store = pd.read_pickle(path)
+    else:
+        store = {"prices": pd.DataFrame(), "no_data": set()}
+    prices, no_data = store["prices"], set(store["no_data"])
+    have = set(prices.columns.get_level_values(0)) if not prices.empty else set()
+    need = [t for t in dict.fromkeys(tickers) if t not in have and t not in no_data]
+    if need:
+        new_parts = []
+        for i in range(0, len(need), chunk):
+            part = need[i:i + chunk]
+            raw = download_all_data(tuple(part), start_date, end_date)
+            for t in part:
+                px = standardize_ohlcv(raw, t) if not raw.empty else pd.DataFrame()
+                if px.empty or px["Close"].notna().sum() == 0:
+                    # 일괄 요청의 일시적 실패와 진짜 '가격 없음'을 구분하려고 한 번 더 단독 요청
+                    time.sleep(0.5)
+                    single = download_all_data((t,), start_date, end_date)
+                    px = standardize_ohlcv(single, t) if not single.empty else pd.DataFrame()
+                if px.empty or px["Close"].notna().sum() == 0:
+                    no_data.add(t)
+                    continue
+                px = px.copy()
+                px.columns = pd.MultiIndex.from_product([[t], px.columns])
+                new_parts.append(px)
+        if new_parts:
+            prices = pd.concat([prices] + new_parts, axis=1) if not prices.empty else pd.concat(new_parts, axis=1)
+            prices = prices.sort_index()
+        pd.to_pickle({"prices": prices, "no_data": no_data}, path)
+    keep = [t for t in dict.fromkeys(tickers) if t in set(prices.columns.get_level_values(0))]
+    return prices.loc[:, keep] if keep else pd.DataFrame()
+
+
+def load_macro_snapshot(start_date: str = SWING_START, end_date: str = SWING_END) -> pd.DataFrame:
+    """거시 지표 스냅샷 (load_price_snapshot과 같은 이유로 캐시). prepare_macro 적용 후 반환."""
+    path = _snapshot_path("macro", start_date, end_date)
+    if os.path.exists(path):
+        raw = pd.read_pickle(path)
+    else:
+        raw = download_macro_data(start_date, end_date)
+        if not raw.empty:
+            pd.to_pickle(raw, path)
+    return prepare_macro(raw)
+
+
+def price_coverage(prices: pd.DataFrame, ticker: str) -> tuple:
+    """티커의 실제 가격(Close가 NaN이 아닌 날) 첫날·마지막날·일수. 없으면 (None, None, 0)."""
+    if prices is None or prices.empty or ticker not in set(prices.columns.get_level_values(0)):
+        return None, None, 0
+    c = prices[(ticker, "Close")].dropna()
+    if c.empty:
+        return None, None, 0
+    return c.index[0], c.index[-1], int(len(c))
+
+@_cache_data(show_spinner=False, ttl=900)
 def compute_market_regime(macro_prepared: pd.DataFrame) -> dict:
     """⭐ 시장 국면(regime) 감지.
 
@@ -481,7 +597,7 @@ def compute_market_regime(macro_prepared: pd.DataFrame) -> dict:
         logging.warning(f"Market regime calc failed: {e}")
         return {}
 
-@st.cache_data(show_spinner=False, ttl=900)
+@_cache_data(show_spinner=False, ttl=900)
 def prepare_macro(macro_df: pd.DataFrame) -> pd.DataFrame:
     """⭐ 최적화: 거시지표(VIX/금리/S&P500) 파싱을 종목마다 반복하지 않고
     한 번만 수행해 캐싱합니다. (기존에는 41개 종목마다 같은 작업을 반복)"""
@@ -641,7 +757,7 @@ def compute_features(df_raw: pd.DataFrame, macro_prepared: pd.DataFrame, ticker:
         logging.error(f"Error computing features for {ticker}: {e}")
         return pd.DataFrame(), False
 
-@st.cache_data(show_spinner=False, ttl=86400)
+@_cache_data(show_spinner=False, ttl=86400)
 def get_fundamentals(ticker: str) -> dict:
     """⭐ PER(주가수익비율)/PBR(주가순자산비율) 조회.
     yfinance의 .info는 시세 다운로드(.history)보다 느리고 실패가 잦아서,
@@ -703,7 +819,7 @@ def _pick_row(df: pd.DataFrame, candidates: list):
             return df.loc[matches[0]]
     return None
 
-@st.cache_data(show_spinner=False, ttl=86400)
+@_cache_data(show_spinner=False, ttl=86400)
 def fetch_raw_statements(ticker: str):
     """yfinance 원본 재무제표 4종(연간 손익/재무상태, 분기 손익/재무상태)만 가져옵니다.
 
@@ -725,7 +841,7 @@ def fetch_raw_statements(ticker: str):
             _safe(lambda: tk.quarterly_income_stmt),
             _safe(lambda: tk.quarterly_balance_sheet))
 
-@st.cache_data(show_spinner=False, ttl=86400)
+@_cache_data(show_spinner=False, ttl=86400)
 def get_fundamental_history(ticker: str,
                             lag_quarterly: int = None,
                             lag_annual: int = None,
@@ -884,10 +1000,18 @@ def build_value_panel(price_df: pd.DataFrame, fund_df: pd.DataFrame,
         if px.empty:
             return pd.DataFrame()
         px.index = pd.to_datetime(px.index).tz_localize(None).normalize()
-        px = px.ffill()
 
         if not include_fundamentals:
-            d = px.copy()
+            # ⭐⭐ [중대 버그 수정] 실제로 거래된 날(Close가 있는 날)만 남긴다.
+            # 여러 티커를 한 번에 받으면 가격이 없는 티커(상장폐지 등)도 전 기간 NaN
+            # 행으로 딸려 오는데, 예전에는 이 NaN 행이 그대로 패널에 들어가 '데이터
+            # 확보'로 집계됐다(4.5절의 '탈락 종목 100% 복원'은 이 집계 오류였음).
+            # 또 상장폐지 이후 구간을 ffill로 마지막 가격에 고정해 '수익률 0'인 가짜
+            # 행을 만들 위험도 있었다. 거래일만 남기면 둘 다 사라진다.
+            d = px[px["Close"].notna()].copy()
+            if d.empty:
+                return pd.DataFrame()
+            d = d.ffill()   # 거래일 안의 개별 필드(Open/Volume 등) 결측만 채움
             d["Momentum_126"] = d["Close"].pct_change(126) * 100
             d["Volatility_60"] = d["Close"].pct_change().rolling(60).std() * 100
             if macro_prepared is not None and not macro_prepared.empty:
@@ -904,6 +1028,7 @@ def build_value_panel(price_df: pd.DataFrame, fund_df: pd.DataFrame,
             keep = [c for c in dict.fromkeys(keep) if c in d.columns]
             return d[keep]
 
+        px = px.ffill()
         if fund_df is None or fund_df.empty:
             return pd.DataFrame()
 
@@ -958,9 +1083,14 @@ def build_swing_panel(tickers, df_all: pd.DataFrame, macro_prepared: pd.DataFram
     수집은 병렬로 하되 결합은 결정론적으로 한다.
     """
     results = {}
+    _have = set(df_all.columns.get_level_values(0)) if isinstance(df_all.columns, pd.MultiIndex) else set()
+
     def one(tk):
+        # ⭐ [성능] 전체(수백 종목) 프레임을 종목마다 통째로 복사하지 않도록 해당 종목 열만 넘긴다.
+        if tk not in _have:
+            return tk, None
         try:
-            return tk, build_value_panel(df_all, None, macro_prepared, tk, include_fundamentals=False)
+            return tk, build_value_panel(df_all[tk], None, macro_prepared, tk, include_fundamentals=False)
         except Exception:
             return tk, None
 
@@ -974,13 +1104,63 @@ def build_swing_panel(tickers, df_all: pd.DataFrame, macro_prepared: pd.DataFram
     # 재현성: 날짜 우선, 같은 날짜 안에서는 티커 알파벳 순으로 고정
     return panel.sort_values("Ticker", kind="mergesort").sort_index(kind="mergesort")
 
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=10)
+
+def load_swing_data(tickers, start_date: str = SWING_START, end_date: str = SWING_END):
+    """논문 실험 공용: 고정 기간의 가격 스냅샷과 거시 지표를 함께 불러온다."""
+    return (load_price_snapshot(sorted(set(tickers)), start_date, end_date),
+            load_macro_snapshot(start_date, end_date))
+
+
+def fmt_result(res: dict) -> str:
+    """실험 로그용 한 줄 요약 (날짜평균 AUC · t · 단측/양측 p · 날짜수)."""
+    return (f"AUC {res['fm_auc']:.4f} · t {res['fm_tstat']:+.2f} · "
+            f"p(단측) {res['pvalue']:.4f} · p(양측) {res['pvalue_two_sided']:.4f} · "
+            f"날짜 {res['fm_n_dates']}")
+
+def add_forward_returns(panel: pd.DataFrame, horizons) -> pd.DataFrame:
+    """종목별 h거래일 뒤 수익률(%)을 `Fwd_Return_{h}` 열로 미리 붙인다.
+
+    ⭐⭐ [중대 버그 수정] 시점별 구성종목 필터(4.5절)는 반드시 이 함수 *뒤에* 적용해야
+    한다. 예전에는 필터로 행을 먼저 지운 뒤 run_value_model이 행 기준 shift(-h)로
+    미래수익률을 만들었다. 그러면 (1) 지수에서 빠지기 직전 h일은 라벨이 사라져
+    표본에서 빠지고 — 지수 탈락은 대개 급락 뒤에 오므로 생존편향에서 가장 중요한
+    구간이다 — (2) 빠졌다가 재편입된 종목은 'h행 뒤'가 몇 달·몇 년 뒤를 가리켰다.
+    전체 가격 이력에서 먼저 계산하면 지수 탈락 이후 가격도 라벨에 반영된다.
+    패널 행은 종목별로 '실제 거래일'만 담고 있어야 한다(build_value_panel 참고).
+    """
+    out = panel.copy()
+    keys = pd.DataFrame({"t": out["Ticker"].values, "d": np.asarray(out.index)})
+    order = keys.sort_values(["t", "d"], kind="mergesort").index.values
+    tmp = out.iloc[order]
+    g = tmp.groupby("Ticker", sort=False)["Close"]
+    for h in dict.fromkeys(int(x) for x in horizons):
+        fwd = (g.shift(-h) / tmp["Close"] - 1.0) * 100
+        col = np.empty(len(out))
+        col[order] = fwd.values
+        out[f"Fwd_Return_{h}"] = col
+    return out
+
+
+def _forward_return_for(src: pd.DataFrame, target: pd.DataFrame, horizon: int) -> np.ndarray:
+    """src(필터 전 패널)에서 계산한 h일 미래수익률을 target 행 순서에 맞춰 돌려준다."""
+    col = f"Fwd_Return_{horizon}"
+    if col not in src.columns:
+        src = add_forward_returns(src[["Ticker", "Close"]], [horizon])
+    key_src = pd.MultiIndex.from_arrays([pd.DatetimeIndex(src.index), src["Ticker"].values])
+    fwd = pd.Series(src[col].values, index=key_src)
+    fwd = fwd[~fwd.index.duplicated(keep="last")]
+    key_tgt = pd.MultiIndex.from_arrays([pd.DatetimeIndex(target.index), target["Ticker"].values])
+    return fwd.reindex(key_tgt).values
+
+
+@_cache_data(show_spinner=False, ttl=3600, max_entries=10)
 def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
                     pvalue_method: str = "fama_macbeth",
                     eval_mode: str = "overlap_nw",
                     train_tickers=None, eval_tickers=None,
                     feature_subset=None, rf_params=None,
-                    require_fundamentals: bool = True):
+                    require_fundamentals: bool = True,
+                    nw_lag_mult: int = None, fixed_b: bool = None):
     """⭐ 횡단면(cross-sectional) 가치투자 모델.
 
     단기 모델과 결정적으로 다른 점:
@@ -988,8 +1168,14 @@ def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
       - 예측 대상이 '오를까?'가 아니라 '같은 날 다른 종목들보다 잘할까?'(상대 성과)
         → 시장 전체 등락(분산의 대부분)이 상쇄되어 신호 대 잡음비가 개선됨
       - 검증은 날짜 기준으로 분할해 미래 정보가 과거로 새지 않도록 함
+
+    nw_lag_mult / fixed_b : 유의성 검정 설정. None이면 NW_LAG_MULT / NW_FIXED_B.
+      (예전 검정을 재현하려면 nw_lag_mult=1, fixed_b=False)
+    panel에 `Fwd_Return_{h}` 열이 있으면 그것을 라벨 재료로 쓴다(add_forward_returns).
     """
     try:
+        # 미래수익률은 아래의 어떤 행 필터보다도 먼저, 들어온 패널 전체로 계산한다.
+        _panel_in = panel
         # ⭐ 피처 단위 내성:
         # 무료 데이터는 종목/항목마다 결측이 제각각이라, 모든 피처를 한꺼번에
         # dropna 하면 항목 하나(예: 주식수 누락 -> Book_to_Price)만 비어도
@@ -1000,7 +1186,7 @@ def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
         # 여러 개 시도해보는' 행위를 재현해야 하기 때문입니다. 기본값은 기존과 동일.
         _rf_kwargs = dict(n_estimators=120, max_depth=3, min_samples_leaf=10,
                           max_features="sqrt", class_weight="balanced",
-                          n_jobs=1, random_state=42)
+                          n_jobs=RF_N_JOBS, random_state=42)
         if rf_params:
             _rf_kwargs.update(rf_params)
 
@@ -1105,9 +1291,10 @@ def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
         else:
             df["_bench_lynch_peg"] = np.nan
 
-        df["Fwd_Return"] = (
-            df.groupby("Ticker")["Close"].shift(-horizon) / df["Close"] - 1.0
-        ) * 100
+        # ⭐ [버그 수정] 예전에는 여기서 (지표 결측 행을 이미 걸러낸) df에 행 기준
+        # shift(-horizon)을 썼다. 중간 행이 빠진 종목은 'horizon행 뒤'가 horizon
+        # 거래일보다 먼 미래가 되어 라벨이 틀어졌다. 필터 전 패널에서 계산해 붙인다.
+        df["Fwd_Return"] = _forward_return_for(_panel_in, df, horizon)
         df = df.dropna(subset=["Fwd_Return"])
         if len(df) < 150 or df["Ticker"].nunique() < 5:
             return {"error": f"분석 가능한 데이터가 {len(df)}행 / {df['Ticker'].nunique() if len(df) else 0}종목뿐입니다 (최소 150행·5종목 필요)"}
@@ -1137,11 +1324,14 @@ def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
         # 솎아내기 방식에선 폴드 수가 곧 평가일 수라 상한이 치명적이었지만,
         # 겹침 허용 방식에선 폴드당 평가일이 많아 3폴드로도 충분합니다.
         n_splits = int(min(3, max_folds))
-        nw_lag = horizon if eval_mode == "overlap_nw" else 0
+        _lag_mult = NW_LAG_MULT if nw_lag_mult is None else int(nw_lag_mult)
+        nw_lag = horizon * _lag_mult if eval_mode == "overlap_nw" else 0
+        _fixed_b = (NW_FIXED_B if fixed_b is None else bool(fixed_b)) and nw_lag > 0
 
         oof_true, oof_prob = [], []
         oof_simple_per, oof_lynch_peg = [], []  # ⭐ 벤치마크용, RF와 동일한 OOF 구간
         oof_eval_dates = []   # ⭐ Fama-MacBeth: 행마다 어느 평가일인지 기록
+        oof_feat = {c: [] for c in rank_feats}   # 지표 하나만으로 순위를 매겼을 때의 AUC용
         n_eval_dates = 0
         for k in range(1, n_splits + 1):
             train_end = int(n_dates * k / (n_splits + 1))
@@ -1183,6 +1373,8 @@ def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
             oof_simple_per.extend(te["_bench_simple_per"].values)
             oof_lynch_peg.extend(te["_bench_lynch_peg"].values)
             oof_eval_dates.extend(te["Date"].values)
+            for c in rank_feats:
+                oof_feat[c].extend(te[c].values)
 
         # ⭐ 학습 가능 여부와 검증 가능 여부를 분리합니다.
         # 무료 재무데이터는 이력이 짧아 '학습은 되는데 누출 없는 검증 구간은
@@ -1224,17 +1416,26 @@ def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
         def _fama_macbeth(scores):
             """날짜별 AUC -> 그 시계열의 t검정. (평균AUC, t값, p값, 유효날짜수) 반환.
             nw_lag > 0 이면 겹치는 평가구간의 자기상관을 Newey-West로 보정합니다."""
-            return fama_macbeth_auc(oof_true, scores, oof_eval_dates, nw_lag=nw_lag)
+            return fama_macbeth_auc(oof_true, scores, oof_eval_dates, nw_lag=nw_lag,
+                                    fixed_b=_fixed_b)
 
         if len(set(oof_true)) >= 2:
             # 전체를 모아 구한 AUC는 '판별력의 점추정'으로는 여전히 유효하므로 표시용으로 유지
             auc = float(roc_auc_score(oof_true, oof_prob))
-            fm_auc, fm_t, pval, fm_T = _fama_macbeth(oof_prob)
+            _det = fama_macbeth_detail(oof_true, oof_prob, oof_eval_dates,
+                                       nw_lag=nw_lag, fixed_b=_fixed_b)
+            fm_auc, fm_t, pval, fm_T = _det["mean_auc"], _det["t"], _det["p"], _det["T"]
+            pval_two = _det["p_two"]
+            per_date_series = _det["series"]
+            # 지표 하나(순위)를 그대로 점수로 쓸 때의 AUC. 0.5보다 작으면 그 지표가
+            # 높을수록 오히려 성과가 나쁘다는 뜻(신호의 '방향' 확인용).
+            feature_fm = {c[:-5]: _fama_macbeth(oof_feat[c]) for c in rank_feats}
             if pvalue_method == "iid":
                 # ⚠️ ablation 전용: 행(종목×날짜) 수를 독립 표본으로 세는 원래(잘못된) 방식.
                 # 같은 날짜 종목들의 종속성을 무시해 표준오차를 크게 과소평가합니다.
                 _np_ = int(sum(oof_true)); _nn_ = len(oof_true) - _np_
                 pval = float(calc_auc_pvalue(auc, _np_, _nn_))
+                pval_two = float(min(1.0, 2.0 * min(pval, 1.0 - pval)))
             _rng = np.random.RandomState(42)
             _rand_scores = _rng.rand(len(oof_true))
             bench_auc = {
@@ -1253,6 +1454,7 @@ def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
         else:
             auc, pval, validated = float("nan"), float("nan"), False
             fm_auc, fm_t, fm_T = float("nan"), float("nan"), 0
+            pval_two, per_date_series, feature_fm = float("nan"), pd.Series(dtype=float), {}
             bench_auc = {"random": float("nan"), "simple_per": float("nan"), "lynch_peg": float("nan")}
             bench_fm = {}
 
@@ -1274,7 +1476,12 @@ def run_value_model(panel: pd.DataFrame, horizon_override: int = None,
         return {
             "scores": cur,
             "auc": auc,               # 전체를 모아 구한 AUC (점추정용)
-            "pvalue": pval,           # ⭐ Fama-MacBeth 기반 p값 (날짜 수 기준)
+            "pvalue": pval,           # ⭐ Fama-MacBeth 기반 p값 (단측: AUC > 0.5)
+            "pvalue_two_sided": pval_two,
+            "per_date_auc": per_date_series,   # 날짜별 AUC (조건 간 대응 검정용)
+            "feature_fm": feature_fm,          # 지표별 단독 (평균AUC, t, p, 날짜수)
+            "nw_lag": int(nw_lag),
+            "fixed_b": bool(_fixed_b),
             "fm_auc": fm_auc,         # 날짜별 AUC의 평균
             "fm_tstat": fm_t,         # 날짜별 AUC 시계열의 t값
             "fm_n_dates": fm_T,       # 검정에 실제 쓰인 독립 날짜 수 (= 유효 표본)
@@ -1361,7 +1568,7 @@ def estimate_slippage(atr_pct: float, vix: float, base_fee_dec: float) -> float:
     vix_extra = max(0.0, (vix - 20.0) / 100.0) * 0.01
     return base_fee_dec + impact + vix_extra
 
-@st.cache_data(show_spinner=False, ttl=900, max_entries=5)
+@_cache_data(show_spinner=False, ttl=900, max_entries=5)
 def run_cross_sectional_model(panel: pd.DataFrame):
     """⭐ 단기 신호의 횡단면(cross-sectional) 강화 모델.
 
@@ -1399,7 +1606,7 @@ def run_cross_sectional_model(panel: pd.DataFrame):
         # 학습은 전체 날짜, 평가는 간격(gap) 확보 + 퍼징 -> 정직한 OOS 추정
         n_splits = 4
         edges = np.array_split(dates, n_splits + 1)
-        yt, yp = [], []
+        yt, yp, yd = [], [], []
         for k in range(1, len(edges)):
             tr_d = np.concatenate(edges[:k])
             cutoff = pd.Timestamp(tr_d[-1]) + pd.Timedelta(days=int(LOOKAHEAD * 1.5))
@@ -1416,12 +1623,18 @@ def run_cross_sectional_model(panel: pd.DataFrame):
             m.fit(tr[rank_feats], tr["CS_Target"])
             yp.extend(m.predict_proba(te[rank_feats])[:, 1])
             yt.extend(te["CS_Target"].values)
+            yd.extend(te["Date"].values)
 
         if len(set(yt)) < 2:
             return None
         auc = roc_auc_score(yt, yp)
-        n_pos = int(sum(yt)); n_neg = len(yt) - n_pos
-        pval = calc_auc_pvalue(auc, n_pos, n_neg)
+        # ⭐⭐ [중대 버그 수정] 예전에는 Hanley-McNeil 공식에 행(종목×날짜) 수를 넣어
+        # p값을 구했다(논문의 결함 ①). 같은 날짜 종목들은 독립이 아니라 p값이 크게
+        # 과소평가된다. 평가일은 위에서 LOOKAHEAD 간격으로 솎아 라벨이 겹치지 않으므로,
+        # 날짜별 AUC 시계열을 t검정하는 Fama-MacBeth(NW 불필요)가 올바른 검정이다.
+        _, _, pval, n_dates = fama_macbeth_auc(yt, yp, yd, nw_lag=0)
+        if not np.isfinite(pval):
+            pval = 1.0          # 독립 평가일이 2개 미만이면 검증 불가 -> 유의하지 않음으로 표시
 
         final = RandomForestClassifier(n_estimators=150, max_depth=3, min_samples_leaf=20,
                                        max_features="sqrt", class_weight="balanced",
@@ -1438,12 +1651,13 @@ def run_cross_sectional_model(panel: pd.DataFrame):
             "scores": dict(zip(cur["Ticker"], cur["cs_score"])),
             "auc": float(auc), "pvalue": float(pval),
             "n_eval": int(len(yt)),
+            "n_dates": int(n_dates),     # 검정에 쓰인 독립 평가일 수 (= 유효 표본)
         }
     except Exception as e:
         logging.warning(f"Cross-sectional model failed: {e}")
         return None
 
-@st.cache_data(show_spinner=False, ttl=900, max_entries=100)
+@_cache_data(show_spinner=False, ttl=900, max_entries=100)
 def run_model_pipeline(df: pd.DataFrame, ticker: str, kelly_cap: float = 25.0, is_macro_fallback: bool = False,
                         prob_threshold: float = 0.38, half_kelly_frac: float = 0.5):
     try:
